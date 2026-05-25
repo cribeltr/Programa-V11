@@ -2122,10 +2122,45 @@ function renderInconsistencias(root, lista, informativos) {
 function tipoInconsLabel(t) {
   return ({
     si_desaparecida: 'Si desaparecida', si_a_causal: 'Si → causal',
+    causal_a_si: 'Causal → Si', resultado_aparecido: 'Resultado aparecido',
     causal_cambiada: 'Causal cambiada', override_no_reflejado: 'Override no reflejado',
     equipo_desaparecido: 'Equipo desaparecido', equipo_nuevo: 'Equipo nuevo',
     cambio_catastro: 'Cambio en catastro', baja_nueva: 'Baja nueva'
   })[t] || t;
+}
+
+function mostrarResumenCambios(data) {
+  const root = el('div');
+  root.innerHTML = '<div class="modal-header"><h3 class="modal-title">' + icon('alert',16) + ' Cambios detectados al recargar el maestro</h3><button class="btn btn-icon btn-ghost" data-close>' + icon('x') + '</button></div>';
+  const body = el('div', { class: 'modal-body' });
+  body.appendChild(el('div', { class: 'kpi-grid mb-3' }, [
+    el('div', { class: 'card card-stat' }, [el('span', { class: 'stat-label', text: 'Cambios detectados' }), el('div', { class: 'stat-value', text: data.cambiosDetectados || 0 })]),
+    el('div', { class: 'card card-stat' }, [el('span', { class: 'stat-label', text: 'Pendientes creados' }), el('div', { class: 'stat-value', text: data.pendientesCreados || 0 })])
+  ]));
+  if (data.cambiosPorTipo && Object.keys(data.cambiosPorTipo).length) {
+    body.appendChild(el('h3', { text: 'Desglose por tipo' }));
+    const tw = el('div', { class: 'table-wrap' });
+    const t = el('table', { class: 'table' });
+    t.innerHTML = '<thead><tr><th>Tipo</th><th>Cantidad</th><th>Acción</th></tr></thead>';
+    const tb = el('tbody');
+    Object.keys(data.cambiosPorTipo).sort().forEach((k) => {
+      const ignorar = ['equipo_nuevo','cambio_catastro','resultado_aparecido'].indexOf(k) >= 0;
+      tb.innerHTML += '<tr><td>' + escapeHtml(tipoInconsLabel(k)) + '</td><td>' + data.cambiosPorTipo[k] + '</td><td>' + (ignorar ? '<span class="badge badge-neutral">informativo</span>' : '<span class="badge badge-warning">pendiente creado</span>') + '</td></tr>';
+    });
+    t.appendChild(tb); tw.appendChild(t); body.appendChild(tw);
+  }
+  root.appendChild(body);
+  const ft = el('div', { class: 'modal-footer' });
+  ft.appendChild(el('button', { class: 'btn btn-secondary', text: 'Ver inconsistencias', onclick: () => {
+    document.querySelectorAll('.modal-backdrop').forEach((b) => b.remove());
+    MP.uiState.pendTab = 'inconsistencias'; navigate('pendientes');
+  } }));
+  ft.appendChild(el('button', { class: 'btn btn-primary', text: 'Ver pendientes', onclick: () => {
+    document.querySelectorAll('.modal-backdrop').forEach((b) => b.remove());
+    MP.uiState.pendTab = 'operativos'; navigate('pendientes');
+  } }));
+  root.appendChild(ft);
+  openModal(root, { size: 'lg' });
 }
 
 /* ===== Vista CALENDARIO ===== */
@@ -3373,6 +3408,17 @@ async function cargarMaestroDesdeArchivo(file) {
   body.appendChild(el('div', { class: 'card', style: 'background:#fef3c7;border-color:#fbbf24' }, [
     el('div', { class: 'tiny' }, [el('strong', { html: icon('alert',12) + ' Atención: ' }), 'Esto <u>reemplaza completamente</u> el contenido actual de PMP_2026 y Registro_MP-2026 en el Google Sheet. Las hojas auxiliares (eventos, pendientes, asignaciones, etc.) no se tocan.'])
   ]));
+  // Checkbox detectar cambios
+  const detectChk = el('input', { type: 'checkbox', id: 'detectarCambios' });
+  detectChk.checked = true;
+  const detectCard = el('div', { class: 'card mb-3' });
+  detectCard.appendChild(el('h3', { text: 'Detección de cambios' }));
+  const detectLbl = el('label', { class: 'row', style: 'cursor:pointer' });
+  detectLbl.appendChild(detectChk);
+  detectLbl.appendChild(el('span', { html: '<strong>Comparar con el estado actual y generar pendientes</strong>' }));
+  detectCard.appendChild(detectLbl);
+  detectCard.appendChild(el('p', { class: 'tiny muted', style: 'margin:8px 0 0', text: 'Antes de reemplazar, la app toma un snapshot del estado actual. Después de cargar el nuevo maestro lo compara y crea un pendiente para cada celda que cambió de manera relevante (ej: si antes era C2 y ahora Si, o si una Si desapareció). Los pendientes quedan en la vista Pendientes con la etiqueta "cambio_maestro".' }));
+  body.appendChild(detectCard);
   // Mostrar primeras filas como preview
   if (pmpRows.length) {
     body.appendChild(el('h3', { class: 'mt-3', text: 'Vista previa PMP_2026 (filas 7–10)' }));
@@ -3391,13 +3437,18 @@ async function cargarMaestroDesdeArchivo(file) {
   const ft = el('div', { class: 'modal-footer' });
   ft.appendChild(el('button', { class: 'btn btn-ghost', text: 'Cancelar', dataset: { close: '1' } }));
   ft.appendChild(el('button', { class: 'btn btn-primary', html: icon('upload',14) + ' Cargar al Google Sheet', onclick: async () => {
+    const detectar = detectChk.checked;
     document.querySelectorAll('.modal-backdrop').forEach((b, i, all) => { if (i === all.length - 1) b.remove(); });
-    Toast.show('Enviando al Sheet… puede tardar 15-60s para archivos grandes');
+    Toast.show(detectar ? 'Snapshot + carga + detección…' : 'Enviando al Sheet…');
     try {
-      const r = await api('cargarMaestro', { pmpRows, regRows, replace: true }, { timeout: 240000 });
+      const r = await api('cargarMaestro', { pmpRows, regRows, replace: true, detectarCambios: detectar }, { timeout: 300000 });
       if (r.ok) {
-        Toast.success('Maestro cargado: ' + r.data.pmpFilas + ' filas PMP, ' + r.data.regFilas + ' filas Registro');
+        const d = r.data || {};
+        let msg = 'Maestro cargado: ' + d.pmpFilas + ' filas PMP, ' + d.regFilas + ' filas Registro';
+        if (detectar) msg += ' · ' + (d.cambiosDetectados || 0) + ' cambios · ' + (d.pendientesCreados || 0) + ' pendientes creados';
+        Toast.success(msg);
         await recargarTodo({ force: true });
+        if (detectar && d.cambiosDetectados) mostrarResumenCambios(d);
       } else Toast.danger('Error: ' + r.error);
     } catch (e) { Toast.danger('Error: ' + e.message); }
   } }));

@@ -54,7 +54,7 @@ const CODIGOS_REG = ['Si', 'Si-RA', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C
 const PRIORIDADES = ['alta', 'media', 'baja'];
 const ESTADOS_PEND = ['abierto', 'cerrado'];
 const TIPOS_EVENTO = ['mp', 'envio', 'solicitud', 'recepcion', 'reparacion'];
-const TIPOS_INCONS = ['si_desaparecida', 'si_a_causal', 'causal_cambiada', 'override_no_reflejado', 'equipo_desaparecido', 'equipo_nuevo', 'cambio_catastro', 'baja_nueva'];
+const TIPOS_INCONS = ['si_desaparecida', 'si_a_causal', 'causal_a_si', 'causal_cambiada', 'override_no_reflejado', 'equipo_desaparecido', 'equipo_nuevo', 'cambio_catastro', 'baja_nueva', 'resultado_aparecido'];
 
 /* =====================================================================
  * Entry point
@@ -351,6 +351,16 @@ function cargarMaestro_(payload) {
   const regRows = payload.regRows || [];
   if (!pmpRows.length && !regRows.length) return { ok: false, error: 'sin_datos' };
 
+  // Si hay que detectar cambios, tomar snapshot del estado actual ANTES de reemplazar
+  const detectar = payload.detectarCambios === true;
+  let snapshotTs = null;
+  if (detectar) {
+    try {
+      const snapRes = tomarSnapshot_(payload);
+      if (snapRes.ok) snapshotTs = snapRes.data.ts;
+    } catch (e) { /* si falla (ej. sheets vacios) seguimos sin detectar */ }
+  }
+
   function escribirHoja(nombre, rows) {
     if (!rows.length) return 0;
     // Calcular ancho máximo
@@ -394,8 +404,68 @@ function cargarMaestro_(payload) {
   } catch (e) {}
 
   invalidateCache_();
-  audit_(payload, 'cargar_maestro', 'config', '', { pmpFilas: totalPmp, regFilas: totalReg });
-  return { ok: true, data: { pmpFilas: totalPmp, regFilas: totalReg } };
+
+  // Detectar cambios contra snapshot tomado al inicio
+  let cambiosDetectados = 0, pendientesCreados = 0;
+  const cambiosPorTipo = {};
+  if (detectar && snapshotTs) {
+    try {
+      const cmp = compararSnapshot_({ __sheetId: payload.__sheetId, ts: snapshotTs, persistir: true });
+      if (cmp.ok && cmp.data && cmp.data.incons) {
+        cambiosDetectados = cmp.data.incons.length;
+        cmp.data.incons.forEach((ic) => {
+          cambiosPorTipo[ic.tipo] = (cambiosPorTipo[ic.tipo] || 0) + 1;
+          // Solo genera pendiente para cambios accionables (no informativos)
+          const ignorar = ['equipo_nuevo', 'cambio_catastro', 'resultado_aparecido'];
+          if (ignorar.indexOf(ic.tipo) >= 0) return;
+          const mes = ic.mes;
+          const mesNombre = (mes >= 1 && mes <= 12)
+            ? ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'][mes - 1]
+            : '';
+          const tipoLabel = ({
+            si_desaparecida: 'Si desaparecida',
+            si_a_causal: 'Si → causal',
+            causal_a_si: 'causal → Si',
+            causal_cambiada: 'Causal cambiada',
+            override_no_reflejado: 'Override no reflejado',
+            equipo_desaparecido: 'Equipo desaparecido',
+            baja_nueva: 'Nueva baja'
+          })[ic.tipo] || ic.tipo;
+          const pend = {
+            equipoKey: ic.equipoKey,
+            descripcion: 'Revisar cambio tras recarga del maestro: ' + tipoLabel +
+              (mesNombre ? ' en ' + mesNombre : '') +
+              ' · antes: ' + (ic.valorAntes || '∅') + ' → ahora: ' + (ic.valorDespues || '∅'),
+            prioridad: 'media',
+            estado: 'abierto',
+            fechaCreacion: nowIso_().slice(0, 10),
+            etiquetas: ['cambio_maestro', ic.tipo],
+            tareas: [],
+            actualizaciones: []
+          };
+          savePendiente_({ __sheetId: payload.__sheetId, pendiente: pend });
+          // Marca inconsistencia como convertida y enlaza
+          const sInc = sheetOrNull_(payload, SHEETS.INCONS);
+          if (sInc) {
+            const data = sInc.getDataRange().getValues();
+            for (let i = 1; i < data.length; i++) {
+              if (data[i][0] === ic.id) {
+                sInc.getRange(i + 1, 8).setValue('convertida_pendiente');
+                sInc.getRange(i + 1, 10).setValue(pend.id || '');
+                break;
+              }
+            }
+          }
+          pendientesCreados++;
+        });
+      }
+    } catch (e) {
+      Logger.log('Detectar cambios fallo: ' + e.message);
+    }
+  }
+
+  audit_(payload, 'cargar_maestro', 'config', '', { pmpFilas: totalPmp, regFilas: totalReg, cambiosDetectados, pendientesCreados });
+  return { ok: true, data: { pmpFilas: totalPmp, regFilas: totalReg, cambiosDetectados, pendientesCreados, cambiosPorTipo, snapshotTs } };
 }
 
 /* =====================================================================
@@ -954,6 +1024,14 @@ function compararSnapshot_(payload) {
       // si_a_causal
       if ((rPrev === 'Si' || rPrev === 'Si-RA') && rNow && rNow !== rPrev && (rNow.charAt(0) === 'C' || rNow === 'FS' || rNow === 'Baja' || rNow === 'NU')) {
         incons.push(mkIncons_('si_a_causal', eq.key, m + 1, rPrev, rNow));
+      }
+      // causal_a_si: el cambio inverso (lo que pidió el usuario)
+      if (rPrev && (rPrev.charAt(0) === 'C' || rPrev === 'FS' || rPrev === 'NU') && (rNow === 'Si' || rNow === 'Si-RA')) {
+        incons.push(mkIncons_('causal_a_si', eq.key, m + 1, rPrev, rNow));
+      }
+      // resultado_aparecido: antes vacio, ahora con valor (informativo)
+      if (!rPrev && rNow) {
+        incons.push(mkIncons_('resultado_aparecido', eq.key, m + 1, '', rNow));
       }
       // causal_cambiada
       if (rPrev && rNow && rPrev.charAt(0) === 'C' && rNow.charAt(0) === 'C' && rPrev !== rNow) {
