@@ -83,6 +83,8 @@ function doGet(e) {
 const ACTIONS = {
   health: (p) => ({ ok: true, ts: Date.now(), schema: SCHEMA_VERSION, sheetOk: testSheet_(p) }),
   inicializarHojas: (p) => withLock(() => inicializarHojas_(p)),
+  cargarMaestro: (p) => withLock(() => cargarMaestro_(p)),
+  toggleHojasSistema: (p) => withLock(() => toggleHojasSistema_(p)),
   getConfig: (p) => getConfig_(p),
   setConfig: (p) => withLock(() => setConfig_(p)),
   getEquipos: (p) => getEquipos_(p),
@@ -293,9 +295,107 @@ function inicializarHojas_(payload) {
     cfg.getRange(2, 1, rows.length, 3).setValues(rows);
   }
 
-  audit_(payload, 'inicializar_hojas', 'config', '', { creadas: created, force: force });
+  // Por defecto, ocultar hojas de sistema (todas las auxiliares EXCEPTO Config)
+  const ocultarPorDefecto = payload && payload.mostrarTodo === true ? false : true;
+  if (ocultarPorDefecto) {
+    defs.forEach((def) => {
+      // Config queda visible para edición manual; el resto se oculta
+      if (def.name === SHEETS.CONFIG) return;
+      const s = ss.getSheetByName(def.name);
+      if (s) try { s.hideSheet(); } catch (e) {}
+    });
+  }
+
+  // Reordenar: PMP_2026 y Registro_MP-2026 quedan primeras
+  try {
+    const pmpS = ss.getSheetByName(SHEETS.PMP);
+    if (pmpS) ss.setActiveSheet(pmpS), ss.moveActiveSheet(1);
+    const regS = ss.getSheetByName(SHEETS.REG);
+    if (regS) ss.setActiveSheet(regS), ss.moveActiveSheet(2);
+  } catch (e) {}
+
+  audit_(payload, 'inicializar_hojas', 'config', '', { creadas: created, force: force, ocultarPorDefecto });
   invalidateCache_();
-  return { ok: true, data: { creadas: created, schema: SCHEMA_VERSION } };
+  return { ok: true, data: { creadas: created, schema: SCHEMA_VERSION, hojasSistemaOcultas: ocultarPorDefecto } };
+}
+
+/* =====================================================================
+ * Toggle visibilidad hojas de sistema
+ * ===================================================================== */
+function toggleHojasSistema_(payload) {
+  const ss = ss_(payload);
+  const mostrar = payload && payload.mostrar === true;
+  const auxiliares = [SHEETS.EVENTOS, SHEETS.PENDIENTES, SHEETS.REPROGS, SHEETS.OVERRIDE,
+    SHEETS.ASIGN, SHEETS.SNAPSHOT, SHEETS.INCONS, SHEETS.AUDIT];
+  let cambiadas = 0;
+  auxiliares.forEach((n) => {
+    const s = ss.getSheetByName(n);
+    if (!s) return;
+    try {
+      if (mostrar) { s.showSheet(); cambiadas++; }
+      else { s.hideSheet(); cambiadas++; }
+    } catch (e) {}
+  });
+  audit_(payload, 'editar', 'config', 'visibilidad', { mostrar, cambiadas });
+  return { ok: true, data: { mostrar, cambiadas } };
+}
+
+/* =====================================================================
+ * Cargar archivo maestro — reemplaza PMP_2026 y Registro_MP-2026
+ *   payload: { pmpRows: [[...]], regRows: [[...]], replace: true }
+ *   Cada matriz es 2D: filas completas (incluido encabezados en fila 7).
+ * ===================================================================== */
+function cargarMaestro_(payload) {
+  const ss = ss_(payload);
+  const pmpRows = payload.pmpRows || [];
+  const regRows = payload.regRows || [];
+  if (!pmpRows.length && !regRows.length) return { ok: false, error: 'sin_datos' };
+
+  function escribirHoja(nombre, rows) {
+    if (!rows.length) return 0;
+    // Calcular ancho máximo
+    let maxCols = 0;
+    rows.forEach((r) => { if (r.length > maxCols) maxCols = r.length; });
+    // Normalizar a igual longitud y sanitizar
+    const normalized = rows.map((r) => {
+      const out = new Array(maxCols);
+      for (let i = 0; i < maxCols; i++) out[i] = sanitizeForCell_(r[i]);
+      return out;
+    });
+    let s = ss.getSheetByName(nombre);
+    if (!s) {
+      s = ss.insertSheet(nombre);
+    } else {
+      s.clear();
+      // limpiar formatos sólo en zona de datos
+    }
+    // Asegurar dimensiones suficientes
+    if (s.getMaxRows() < normalized.length) s.insertRowsAfter(s.getMaxRows(), normalized.length - s.getMaxRows());
+    if (s.getMaxColumns() < maxCols) s.insertColumnsAfter(s.getMaxColumns(), maxCols - s.getMaxColumns());
+    s.getRange(1, 1, normalized.length, maxCols).setValues(normalized);
+    // Formato encabezado en fila 7 (PMP) o equivalente
+    try {
+      s.getRange(7, 1, 1, maxCols).setFontWeight('bold').setBackground('#1f3a64').setFontColor('#ffffff');
+      s.setFrozenRows(7);
+    } catch (e) {}
+    return normalized.length;
+  }
+
+  let totalPmp = 0, totalReg = 0;
+  if (pmpRows.length) totalPmp = escribirHoja(SHEETS.PMP, pmpRows);
+  if (regRows.length) totalReg = escribirHoja(SHEETS.REG, regRows);
+
+  // Asegurar que están al frente
+  try {
+    const pmpS = ss.getSheetByName(SHEETS.PMP);
+    if (pmpS) { ss.setActiveSheet(pmpS); ss.moveActiveSheet(1); }
+    const regS = ss.getSheetByName(SHEETS.REG);
+    if (regS) { ss.setActiveSheet(regS); ss.moveActiveSheet(2); }
+  } catch (e) {}
+
+  invalidateCache_();
+  audit_(payload, 'cargar_maestro', 'config', '', { pmpFilas: totalPmp, regFilas: totalReg });
+  return { ok: true, data: { pmpFilas: totalPmp, regFilas: totalReg } };
 }
 
 /* =====================================================================

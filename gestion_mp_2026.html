@@ -2342,6 +2342,35 @@ function renderConfig(root) {
   ]));
   root.appendChild(ap);
 
+  // === CARGAR MAESTRO (Excel/.xlsm) ===
+  const maest = el('div', { class: 'card mb-3' });
+  maest.innerHTML = '<h3>' + icon('upload',16) + ' Cargar maestro (Excel)</h3>' +
+    '<p class="tiny muted">Sube tu archivo <code>ProgramaciónMP_2026.xlsm</code> (o .xlsx) directamente desde aquí. La app lee las hojas <code>PMP_2026</code> y <code>Registro_MP-2026</code> y reemplaza el contenido equivalente en el Google Sheet.</p>';
+  const mrow = el('div', { class: 'row' });
+  const inpFile = el('input', { type: 'file', accept: '.xlsm,.xlsx,.xls', id: 'maestroFile', style: 'display:none' });
+  inpFile.addEventListener('change', (e) => cargarMaestroDesdeArchivo(e.target.files[0]));
+  const btnPick = el('button', { class: 'btn btn-primary', html: icon('upload',14) + ' Elegir archivo y cargar' });
+  btnPick.addEventListener('click', () => inpFile.click());
+  mrow.appendChild(btnPick);
+  mrow.appendChild(inpFile);
+  mrow.appendChild(el('span', { class: 'tiny muted', text: 'No requiere subir a Drive. Todo se procesa en tu navegador.' }));
+  maest.appendChild(mrow);
+  root.appendChild(maest);
+
+  // === VISIBILIDAD HOJAS SISTEMA ===
+  const vis = el('div', { class: 'card mb-3' });
+  vis.innerHTML = '<h3>' + icon('eye',16) + ' Visibilidad de hojas en el Sheet</h3>' +
+    '<p class="tiny muted">Las hojas auxiliares (Eventos, Pendientes, Snapshot, AuditLog, etc.) se ocultan por defecto para que sólo veas las dos hojas de trabajo. Puedes mostrarlas para depuración.</p>';
+  const vrow = el('div', { class: 'row' });
+  vrow.appendChild(el('button', { class: 'btn btn-secondary', html: icon('eye',12) + ' Mostrar hojas de sistema', onclick: async () => {
+    try { const r = await api('toggleHojasSistema', { mostrar: true }); if (r.ok) Toast.success('Hojas mostradas (' + r.data.cambiadas + ')'); else Toast.danger(r.error); } catch (e) { Toast.danger('Sin conexión'); }
+  } }));
+  vrow.appendChild(el('button', { class: 'btn btn-secondary', html: icon('eye-off',12) + ' Ocultar hojas de sistema', onclick: async () => {
+    try { const r = await api('toggleHojasSistema', { mostrar: false }); if (r.ok) Toast.success('Hojas ocultas (' + r.data.cambiadas + ')'); else Toast.danger(r.error); } catch (e) { Toast.danger('Sin conexión'); }
+  } }));
+  vis.appendChild(vrow);
+  root.appendChild(vis);
+
   // Datos
   const dat = el('div', { class: 'card mb-3' });
   dat.innerHTML = '<h3>' + icon('archive',16) + ' Datos</h3>';
@@ -2982,6 +3011,88 @@ function exportarPdfMes(mes, equipos) {
   win.document.write(html); win.document.close();
 }
 
+/* ===== Cargar maestro Excel (.xlsm/.xlsx) ===== */
+async function cargarMaestroDesdeArchivo(file) {
+  if (!file) return;
+  Toast.show('Leyendo archivo… (' + Math.round(file.size / 1024) + ' KB)');
+  const X = await loadXLSX();
+  if (!X) return;
+  let wb;
+  try {
+    const buf = await file.arrayBuffer();
+    wb = X.read(buf, { type: 'array', cellDates: false, cellNF: false });
+  } catch (e) { Toast.danger('No se pudo leer el archivo: ' + e.message); return; }
+  // Buscar hojas case-insensitive con variantes comunes
+  const names = wb.SheetNames || [];
+  function findSheet(target) {
+    const t = target.toLowerCase().replace(/[^a-z0-9]/g, '');
+    return names.find((n) => n.toLowerCase().replace(/[^a-z0-9]/g, '') === t);
+  }
+  const pmpName = findSheet('PMP_2026') || findSheet('PMP2026') || findSheet('PMP');
+  const regName = findSheet('Registro_MP-2026') || findSheet('RegistroMP2026') || findSheet('Registro');
+  if (!pmpName && !regName) {
+    Toast.danger('No encontré las hojas PMP_2026 ni Registro_MP-2026. Hojas en el archivo: ' + names.join(', '));
+    return;
+  }
+  function sheetTo2D(name) {
+    if (!name) return [];
+    const ws = wb.Sheets[name];
+    const arr = X.utils.sheet_to_json(ws, { header: 1, defval: '', blankrows: true });
+    // Quitar filas completamente vacías al final
+    while (arr.length && arr[arr.length - 1].every((c) => c === '' || c == null)) arr.pop();
+    return arr;
+  }
+  const pmpRows = sheetTo2D(pmpName);
+  const regRows = sheetTo2D(regName);
+
+  // Preview en modal
+  const root = el('div');
+  root.innerHTML = '<div class="modal-header"><h3 class="modal-title">Confirmar carga del maestro</h3><button class="btn btn-icon btn-ghost" data-close>' + icon('x') + '</button></div>';
+  const body = el('div', { class: 'modal-body' });
+  body.appendChild(el('div', { class: 'card mb-3' }, [
+    el('h3', { text: 'Resumen del archivo' }),
+    el('div', { class: 'tiny' }, [el('strong', { text: file.name })]),
+    el('div', { class: 'tiny muted', text: 'Tamaño: ' + Math.round(file.size / 1024) + ' KB' }),
+    el('div', { class: 'mt-2' }, [
+      el('div', { html: '<strong>PMP_2026</strong>: ' + (pmpName ? pmpRows.length + ' filas (incluye encabezados)' : '<span class="badge badge-danger">no encontrada</span>') }),
+      el('div', { html: '<strong>Registro_MP-2026</strong>: ' + (regName ? regRows.length + ' filas (incluye encabezados)' : '<span class="badge badge-warning">no encontrada (opcional)</span>') })
+    ])
+  ]));
+  body.appendChild(el('div', { class: 'card', style: 'background:#fef3c7;border-color:#fbbf24' }, [
+    el('div', { class: 'tiny' }, [el('strong', { html: icon('alert',12) + ' Atención: ' }), 'Esto <u>reemplaza completamente</u> el contenido actual de PMP_2026 y Registro_MP-2026 en el Google Sheet. Las hojas auxiliares (eventos, pendientes, asignaciones, etc.) no se tocan.'])
+  ]));
+  // Mostrar primeras filas como preview
+  if (pmpRows.length) {
+    body.appendChild(el('h3', { class: 'mt-3', text: 'Vista previa PMP_2026 (filas 7–10)' }));
+    const tw = el('div', { class: 'table-wrap', style: 'max-height:200px;overflow:auto' });
+    const t = el('table', { class: 'table table-dense' });
+    const start = Math.max(6, 0); // fila 7 (index 6) = encabezados
+    const end = Math.min(start + 4, pmpRows.length);
+    let h = '<tbody>';
+    for (let i = start; i < end; i++) {
+      h += '<tr>' + (pmpRows[i] || []).slice(0, 12).map((c) => '<td>' + escapeHtml(String(c).slice(0, 30)) + '</td>').join('') + '</tr>';
+    }
+    h += '</tbody>';
+    t.innerHTML = h; tw.appendChild(t); body.appendChild(tw);
+  }
+  root.appendChild(body);
+  const ft = el('div', { class: 'modal-footer' });
+  ft.appendChild(el('button', { class: 'btn btn-ghost', text: 'Cancelar', dataset: { close: '1' } }));
+  ft.appendChild(el('button', { class: 'btn btn-primary', html: icon('upload',14) + ' Cargar al Google Sheet', onclick: async () => {
+    document.querySelectorAll('.modal-backdrop').forEach((b, i, all) => { if (i === all.length - 1) b.remove(); });
+    Toast.show('Enviando al Sheet… puede tardar 15-60s para archivos grandes');
+    try {
+      const r = await api('cargarMaestro', { pmpRows, regRows, replace: true }, { timeout: 240000 });
+      if (r.ok) {
+        Toast.success('Maestro cargado: ' + r.data.pmpFilas + ' filas PMP, ' + r.data.regFilas + ' filas Registro');
+        await recargarTodo({ force: true });
+      } else Toast.danger('Error: ' + r.error);
+    } catch (e) { Toast.danger('Error: ' + e.message); }
+  } }));
+  root.appendChild(ft);
+  openModal(root, { size: 'lg' });
+}
+
 function exportarRespaldoJSON() {
   const data = {
     schema: SCHEMA_VERSION, ts: new Date().toISOString(),
@@ -3089,6 +3200,8 @@ function bindAtajos() {
         else if (e2.key === 'v') navigate('verificacion');
         else if (e2.key === 'c') navigate('config');
         else if (e2.key === 'b') navigate('buscar');
+        else if (e2.key === 'm') navigate('plantilla');
+        else if (e2.key === 'k') navigate('calendario');
         document.removeEventListener('keydown', handler, true);
       };
       document.addEventListener('keydown', handler, true);

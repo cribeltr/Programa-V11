@@ -6,9 +6,9 @@ Tienes dos archivos en este paquete:
 
 Tiempo estimado: 10 minutos.
 
-## 1. Sube el archivo Excel a Google Sheets
+## 1. Crea un Google Sheet vacío
 
-Abre [drive.google.com](https://drive.google.com) → "Nuevo" → "Carga de archivos" → sube `ProgramaciónMP_2026.xlsm`. Una vez subido, click derecho → "Abrir con Google Sheets". Guarda el archivo como Google Sheet (Archivo → Guardar como Hojas de cálculo de Google si no se hizo automáticamente). Las hojas `PMP_2026` y `Registro_MP-2026` deben mantener exactamente esos nombres.
+Abre [sheets.google.com](https://sheets.google.com) → "Hoja en blanco". Asígnale un nombre, ej. `MP_2026_HHHA`. **No subas el .xlsm a Drive**: lo cargarás directamente desde la app más tarde (paso 8).
 
 ## 2. Copia el SPREADSHEET_ID
 
@@ -58,9 +58,17 @@ En el Apps Script:
 - **Paso 3**: pega la URL en `WEB_APP_URL`.
 - Pulsa "Probar conexión y entrar".
 
-Si todo está bien aparece el toast verde "Conectado ✓" y la app inicializa las 9 hojas auxiliares en tu Sheet.
+Si todo está bien aparece el toast verde "Conectado ✓" y la app inicializa las 9 hojas auxiliares en tu Sheet. **Las hojas auxiliares se crean ocultas** para que sólo veas `PMP_2026` y `Registro_MP-2026` cuando abras el Sheet.
 
-## 7. (Opcional) Activa los triggers automáticos
+## 7. Sube el maestro Excel desde la app
+
+Configuración → **Cargar maestro (Excel)** → "Elegir archivo y cargar" → selecciona tu `ProgramaciónMP_2026.xlsm` (o .xlsx).
+
+La app lee el archivo en tu navegador (no se sube a Drive), te muestra un preview con el conteo de filas y las primeras filas de `PMP_2026`, y cuando confirmas envía todo al Google Sheet. En 15–60 segundos las hojas `PMP_2026` y `Registro_MP-2026` quedan pobladas.
+
+> **Reemplaza el contenido completo** de esas dos hojas. Las hojas auxiliares (eventos, pendientes, asignaciones) **no se tocan**.
+
+## 8. (Opcional) Activa los triggers automáticos
 
 En el editor de Apps Script:
 1. Selecciona la función `setupTriggers` en el dropdown superior.
@@ -72,14 +80,14 @@ Esto programa:
 - Backup del Sheet en carpeta `Respaldos_MP_2026` diariamente a las 2:00 (conserva 30 copias).
 - Email de aviso al inicio de cada mes (sólo si `NOTIFICAR_INICIO_MES=true` y `EMAIL_NOTIFICACIONES` está poblado en la hoja `Config`).
 
-## 8. Uso diario
+## 9. Uso diario
 
 - La app guarda la config en `localStorage`. No vuelve a pedirla.
 - Si recargas la pantalla (F5), vuelve exactamente al estado donde la dejaste.
 - Todas las acciones funcionan **offline**: se aplican localmente al instante y se sincronizan en segundo plano. El indicador del header te muestra cuántos cambios hay en cola.
 - Si pierdes conexión, sigue trabajando: los cambios se acumulan en cola.
 
-## 9. Instalar en el celular (PWA-lite)
+## 10. Instalar en el celular (PWA-lite)
 
 1. Abre la app en el celular (puedes escanear el QR desde Configuración → Generar QR).
 2. **iOS Safari**: botón compartir → "Agregar a pantalla de inicio".
@@ -87,7 +95,7 @@ Esto programa:
 
 Se instala con icono propio. Útil para escanear códigos de barras en terreno con la cámara del teléfono.
 
-## 10. Importar datos del Excel actual
+## 11. (Opcional) Importar respaldo de la versión HTML anterior
 
 Si ya tienes un respaldo JSON exportado desde la versión HTML anterior:
 
