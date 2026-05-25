@@ -2888,38 +2888,57 @@ function equipoAutocomplete(p) {
     inp.value = (eq.inventario || eq.id) + ' · ' + eq.equipo;
   }
   // Marcar valido / invalido visualmente
+  function marcarOk(eq) {
+    p.equipoKey = eq.key;
+    inp.style.borderColor = 'var(--c-success)';
+    hint.innerHTML = '<span style="color:var(--c-success)">✓ ' + escapeHtml(eq.equipo) + ' · Inv ' + escapeHtml(eq.inventario) + (eq.serie ? ' · Serie ' + escapeHtml(eq.serie) : '') + '</span>';
+  }
+  function marcarVacio() {
+    p.equipoKey = '';
+    inp.style.borderColor = '';
+    hint.textContent = 'Sin equipo asociado (pendiente suelto)';
+  }
+  function marcarSinMatch() {
+    p.equipoKey = '';
+    inp.style.borderColor = 'var(--c-danger)';
+    hint.innerHTML = '<span style="color:var(--c-danger)">Sin coincidencia — selecciona una sugerencia</span>';
+  }
   function resolverYMarcar() {
     const v = inp.value.trim();
-    if (!v) { p.equipoKey = ''; inp.style.borderColor = ''; hint.textContent = 'Sin equipo asociado (pendiente suelto)'; return; }
+    if (!v) { marcarVacio(); return; }
     const eq = matchEquipo(v);
-    if (eq) {
-      p.equipoKey = eq.key;
-      inp.style.borderColor = 'var(--c-success)';
-      hint.innerHTML = '<span style="color:var(--c-success)">✓ ' + escapeHtml(eq.equipo) + ' · Inv ' + escapeHtml(eq.inventario) + (eq.serie ? ' · Serie ' + escapeHtml(eq.serie) : '') + '</span>';
-    } else {
-      p.equipoKey = '';
-      inp.style.borderColor = 'var(--c-danger)';
-      hint.innerHTML = '<span style="color:var(--c-danger)">Sin coincidencia exacta — selecciona una sugerencia</span>';
-    }
+    if (eq) marcarOk(eq);
+    else marcarSinMatch();
   }
   function matchEquipo(q) {
     const nq = normalize(q);
     const list = (MP.equipos.data || []).filter((e) => !e.isSlot);
-    // 1) match exacto por inventario
+    // 1) match exacto por inventario / serie / id
     let eq = list.find((e) => e.inventario && normalize(e.inventario) === nq);
     if (eq) return eq;
-    // 2) match exacto por serie
     eq = list.find((e) => e.serie && normalize(e.serie) === nq);
     if (eq) return eq;
-    // 3) match por id
     eq = list.find((e) => e.id && normalize(e.id) === nq);
     if (eq) return eq;
-    // 4) inv:XXX
+    // 2) si el texto incluye " · " (formato de la sugerencia "INV · Nombre"),
+    //    extrae la parte antes del " · " y reintenta exactos
+    if (q.indexOf('·') >= 0) {
+      const head = normalize(q.split('·')[0].trim());
+      eq = list.find((e) => normalize(e.inventario) === head || normalize(e.serie) === head || normalize(e.id) === head);
+      if (eq) return eq;
+    }
+    // 3) operador inv:XXX
     const m = q.match(/inv[:\s]+([^\s·]+)/i);
     if (m) {
       eq = list.find((e) => normalize(e.inventario) === normalize(m[1]));
       if (eq) return eq;
     }
+    // 4) match único parcial por inventario / serie (si solo hay 1 candidato)
+    const partial = list.filter((e) =>
+      (e.inventario && normalize(e.inventario).indexOf(nq) >= 0) ||
+      (e.serie && normalize(e.serie).indexOf(nq) >= 0)
+    );
+    if (partial.length === 1) return partial[0];
     return null;
   }
   const sug = el('div', { style: 'position:absolute;top:100%;left:0;right:0;background:var(--c-bg-elev);border:1px solid var(--c-border);border-radius:var(--rd-md);box-shadow:var(--sh-md);max-height:220px;overflow-y:auto;z-index:50;display:none' });
@@ -2946,7 +2965,7 @@ function equipoAutocomplete(p) {
         e.preventDefault();
         inp.value = (eq.inventario || eq.id) + ' · ' + eq.equipo;
         sug.style.display = 'none';
-        resolverYMarcar();
+        marcarOk(eq);  // setea p.equipoKey y borde verde sin reintentar match
         saveDraft();
       });
       sug.appendChild(it);
