@@ -2606,8 +2606,18 @@ function abrirFichaEquipo(key) {
     const ul = el('div', { class: 'stack' });
     evs.slice(0, 10).forEach((ev) => {
       const c = el('div', { class: 'card', style: 'padding:8px 12px' });
-      c.innerHTML = '<div class="row-between"><strong>' + escapeHtml(ev.tipo) + '</strong><span class="tiny muted">' + fmtFecha(ev.fecha) + '</span></div>' +
-        '<div class="tiny">' + (ev.resultado ? codigoBadge(ev.resultado) + ' ' : '') + escapeHtml(ev.ejecutor || '') + (ev.observacion ? ' · ' + escapeHtml(ev.observacion) : '') + '</div>';
+      const tipoLabel = (EVENTO_CAMPOS[ev.tipo] && EVENTO_CAMPOS[ev.tipo].label) || ev.tipo;
+      const det = [];
+      if (ev.resultado) det.push(codigoBadge(ev.resultado));
+      if (ev.ejecutor) det.push(escapeHtml(ev.ejecutor));
+      if (ev.empresa) det.push(icon('package',11) + ' ' + escapeHtml(ev.empresa));
+      if (ev.nEnvio) det.push('Envío: ' + escapeHtml(ev.nEnvio));
+      if (ev.folio) det.push('Folio: ' + escapeHtml(ev.folio));
+      if (ev.folioGuia) det.push('Guía: ' + escapeHtml(ev.folioGuia));
+      if (ev.estadoEquipo) det.push('Estado: ' + escapeHtml(ev.estadoEquipo));
+      c.innerHTML = '<div class="row-between"><strong>' + escapeHtml(tipoLabel) + '</strong><span class="tiny muted">' + fmtFecha(ev.fecha) + '</span></div>' +
+        (det.length ? '<div class="tiny mt-1">' + det.join(' · ') + '</div>' : '') +
+        (ev.observacion ? '<div class="tiny muted mt-1">' + escapeHtml(ev.observacion) + '</div>' : '');
       c.addEventListener('click', () => abrirModalEvento(eq, ev));
       ul.appendChild(c);
     });
@@ -3005,18 +3015,83 @@ function fieldSelect(label, key, value, options) {
 }
 
 /* ===== Modal Evento ===== */
+const EVENTO_CAMPOS = {
+  mp: {
+    label: 'Mantención preventiva',
+    campos: ['fecha','resultado','estadoEquipo','ejecutor','observacion']
+  },
+  envio: {
+    label: 'Envío al servicio técnico',
+    campos: ['fecha','nEnvio','empresa','folio','ejecutor','observacion']
+  },
+  solicitud: {
+    label: 'Solicitud de trabajo',
+    campos: ['fecha','folio','ejecutor','observacion']
+  },
+  recepcion: {
+    label: 'Recepción del servicio técnico',
+    campos: ['fecha','folioGuia','empresa','ejecutor','observacion']
+  },
+  reparacion: {
+    label: 'Reparación interna',
+    campos: ['fecha','ejecutor','estadoEquipo','observacion']
+  }
+};
+const EVENTO_CAMPO_DEFS = {
+  fecha:        { label: 'Fecha', tipo: 'date' },
+  resultado:    { label: 'Resultado', tipo: 'select', opts: CODIGOS_REG, allowEmpty: true },
+  estadoEquipo: { label: 'Estado del equipo', tipo: 'select', opts: ['Operativo','No operativo','En servicio técnico'], allowEmpty: true },
+  ejecutor:     { label: 'Ejecutor / responsable', tipo: 'select', opts: EJECUTORES_DEFAULT, allowEmpty: true },
+  observacion:  { label: 'Observación', tipo: 'textarea' },
+  nEnvio:       { label: 'N° de envío', tipo: 'text' },
+  empresa:      { label: 'Empresa / servicio técnico externo', tipo: 'text' },
+  folio:        { label: 'Folio / N° solicitud', tipo: 'text' },
+  folioGuia:    { label: 'Folio guía de despacho', tipo: 'text' },
+  comentario:   { label: 'Comentario', tipo: 'textarea' }
+};
+
 function abrirModalEvento(eq, ev) {
   const isNew = !ev || !ev.id;
   ev = ev || { tipo: 'mp', fecha: todayISO(), equipoKey: eq.key };
   const root = el('div');
   root.innerHTML = '<div class="modal-header"><h3 class="modal-title">' + (isNew ? 'Nuevo evento' : 'Editar evento') + ' · ' + escapeHtml(eq.equipo) + '</h3><button class="btn btn-icon btn-ghost" data-close>' + icon('x') + '</button></div>';
   const body = el('div', { class: 'modal-body' });
-  body.appendChild(fieldSelect('Tipo', 'tipo', ev.tipo, ['mp','envio','solicitud','recepcion','reparacion'].map((t) => ({ value: t, label: t }))));
-  body.appendChild(fieldText('Fecha', 'fecha', ev.fecha, { type: 'date' }));
-  body.appendChild(fieldSelect('Resultado', 'resultado', ev.resultado, [''].concat(CODIGOS_REG).map((c) => ({ value: c, label: c || '— sin —' }))));
-  body.appendChild(fieldSelect('Estado equipo', 'estadoEquipo', ev.estadoEquipo, ['','Operativo','No operativo','En servicio técnico'].map((s) => ({ value: s, label: s || '— sin —' }))));
-  body.appendChild(fieldSelect('Ejecutor', 'ejecutor', ev.ejecutor, [''].concat(EJECUTORES_DEFAULT).map((e) => ({ value: e, label: e || '— sin —' }))));
-  body.appendChild(fieldText('Observación', 'observacion', ev.observacion, { textarea: true }));
+
+  // Selector de tipo (siempre arriba)
+  const tipoWrap = el('label', { class: 'field' });
+  tipoWrap.appendChild(el('span', { class: 'lbl', text: 'Tipo de evento' }));
+  const tipoSel = el('select', { class: 'select' });
+  Object.keys(EVENTO_CAMPOS).forEach((t) => {
+    const o = el('option', { value: t, text: EVENTO_CAMPOS[t].label });
+    if (ev.tipo === t) o.selected = true;
+    tipoSel.appendChild(o);
+  });
+  tipoWrap.appendChild(tipoSel);
+  body.appendChild(tipoWrap);
+
+  // Contenedor de campos dinámicos
+  const camposCont = el('div'); body.appendChild(camposCont);
+
+  function pintarCampos() {
+    // Antes de re-pintar, captura valores actuales para no perderlos
+    camposCont.querySelectorAll('[data-key]').forEach((i) => { ev[i.dataset.key] = i.value; });
+    camposCont.innerHTML = '';
+    const def = EVENTO_CAMPOS[ev.tipo] || EVENTO_CAMPOS.mp;
+    def.campos.forEach((c) => {
+      const fd = EVENTO_CAMPO_DEFS[c]; if (!fd) return;
+      if (fd.tipo === 'select') {
+        const opts = fd.allowEmpty ? [''].concat(fd.opts) : fd.opts;
+        camposCont.appendChild(fieldSelect(fd.label, c, ev[c] || '', opts.map((o) => ({ value: o, label: o || '— sin —' }))));
+      } else if (fd.tipo === 'textarea') {
+        camposCont.appendChild(fieldText(fd.label, c, ev[c], { textarea: true }));
+      } else {
+        camposCont.appendChild(fieldText(fd.label, c, ev[c], { type: fd.tipo || 'text' }));
+      }
+    });
+  }
+  pintarCampos();
+  tipoSel.addEventListener('change', () => { ev.tipo = tipoSel.value; pintarCampos(); });
+
   root.appendChild(body);
   const ft = el('div', { class: 'modal-footer' });
   if (!isNew) ft.appendChild(el('button', { class: 'btn btn-danger', html: icon('trash',12) + ' Eliminar', onclick: () => {
@@ -3028,8 +3103,10 @@ function abrirModalEvento(eq, ev) {
   } }));
   ft.appendChild(el('button', { class: 'btn btn-ghost', text: 'Cancelar', dataset: { close: '1' } }));
   ft.appendChild(el('button', { class: 'btn btn-primary', text: 'Guardar', onclick: () => {
-    body.querySelectorAll('[data-key]').forEach((i) => ev[i.dataset.key] = i.value);
+    // Captura todos los campos visibles
+    camposCont.querySelectorAll('[data-key]').forEach((i) => ev[i.dataset.key] = i.value);
     // Validaciones
+    if (!ev.fecha) { Toast.warning('La fecha es obligatoria'); return; }
     if (ev.fecha && new Date(ev.fecha) > new Date(Date.now() + 30 * 86400000)) {
       Toast.warning('Fecha futura >30 días, revisa.');
     }
