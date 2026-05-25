@@ -3102,6 +3102,26 @@ function abrirModalEvento(eq, ev) {
     abrirFichaEquipo(eq.key);
   } }));
   ft.appendChild(el('button', { class: 'btn btn-ghost', text: 'Cancelar', dataset: { close: '1' } }));
+  ft.appendChild(el('button', { class: 'btn btn-secondary', html: icon('plus',12) + ' Pendiente asociado', onclick: () => {
+    // Captura los valores actuales para construir descripción
+    camposCont.querySelectorAll('[data-key]').forEach((i) => ev[i.dataset.key] = i.value);
+    const tipoLabel = (EVENTO_CAMPOS[ev.tipo] && EVENTO_CAMPOS[ev.tipo].label) || ev.tipo;
+    const partes = [tipoLabel + (ev.fecha ? ' (' + fmtFecha(ev.fecha) + ')' : '')];
+    if (ev.resultado) partes.push('Resultado: ' + ev.resultado);
+    if (ev.empresa) partes.push('Empresa: ' + ev.empresa);
+    if (ev.nEnvio) partes.push('Envío: ' + ev.nEnvio);
+    if (ev.folio) partes.push('Folio: ' + ev.folio);
+    if (ev.folioGuia) partes.push('Guía: ' + ev.folioGuia);
+    if (ev.observacion) partes.push(ev.observacion);
+    const desc = 'Seguimiento ' + partes.join(' · ');
+    abrirModalPendiente({
+      equipoKey: eq.key, descripcion: desc,
+      prioridad: 'media', estado: 'abierto',
+      ejecutor: ev.ejecutor || '',
+      etiquetas: ['evento', ev.tipo],
+      tareas: [], actualizaciones: []
+    });
+  } }));
   ft.appendChild(el('button', { class: 'btn btn-primary', text: 'Guardar', onclick: () => {
     // Captura todos los campos visibles
     camposCont.querySelectorAll('[data-key]').forEach((i) => ev[i.dataset.key] = i.value);
@@ -3115,7 +3135,23 @@ function abrirModalEvento(eq, ev) {
     if (idx >= 0) MP.eventos.data[idx] = ev; else MP.eventos.data.push(ev);
     saveCache(LS.cacheEv, MP.eventos);
     Queue.add('saveEvento', { evento: ev });
-    Toast.success('Guardado localmente');
+
+    // Si es MP con resultado y fecha → sincroniza override del mes
+    if (ev.tipo === 'mp' && ev.resultado && ev.fecha) {
+      const mes = (new Date(ev.fecha)).getMonth() + 1; // 1..12
+      if (mes >= 1 && mes <= 12) {
+        Queue.add('saveResultadoOverride', { equipoKey: eq.key, mes, resultado: ev.resultado });
+        if (!MP.overrides.data[eq.key]) MP.overrides.data[eq.key] = {};
+        MP.overrides.data[eq.key][mes - 1] = ev.resultado;
+        saveCache(LS.cacheOver, MP.overrides);
+        calcularKPIsLocal();
+        Toast.success('Evento guardado · Programación 2026 actualizada (' + MESES[mes - 1] + ' → ' + ev.resultado + ')');
+      } else {
+        Toast.success('Guardado localmente');
+      }
+    } else {
+      Toast.success('Guardado localmente');
+    }
     document.querySelectorAll('.modal-backdrop').forEach((b, i, all) => { if (i === all.length - 1) b.remove(); });
     abrirFichaEquipo(eq.key);
   } }));
