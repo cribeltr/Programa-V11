@@ -1756,6 +1756,15 @@ function renderBuscar(root) {
 
   // Filtros
   const f = el('div', { class: 'card mb-3' });
+  // Fila 1: campos de texto directos (inv, serie, carpeta)
+  const fr1 = el('div', { class: 'row mb-2' });
+  fr1.appendChild(textoFiltro('N° Inventario', filtros.inv, (v) => { filtros.inv = v; MP.uiState.filtros = filtros; saveUiState(); renderView('buscar'); }));
+  fr1.appendChild(textoFiltro('Serie', filtros.serie, (v) => { filtros.serie = v; MP.uiState.filtros = filtros; saveUiState(); renderView('buscar'); }));
+  fr1.appendChild(textoFiltro('Carpeta', filtros.carpeta, (v) => { filtros.carpeta = v; MP.uiState.filtros = filtros; saveUiState(); renderView('buscar'); }));
+  fr1.appendChild(textoFiltro('Marca', filtros.marca, (v) => { filtros.marca = v; MP.uiState.filtros = filtros; saveUiState(); renderView('buscar'); }));
+  fr1.appendChild(textoFiltro('Modelo', filtros.modelo, (v) => { filtros.modelo = v; MP.uiState.filtros = filtros; saveUiState(); renderView('buscar'); }));
+  f.appendChild(fr1);
+  // Fila 2: dropdowns y toggles
   f.appendChild(el('div', { class: 'row mb-2' }, [
     selectFiltro('Servicio', filtros.servicio, serviciosUnicos(), (v) => { filtros.servicio = v; MP.uiState.filtros = filtros; saveUiState(); renderView('buscar'); }),
     selectFiltro('Familia', filtros.familia, FAMILIAS_FIJAS, (v) => { filtros.familia = v; MP.uiState.filtros = filtros; saveUiState(); renderView('buscar'); }),
@@ -1763,7 +1772,7 @@ function renderBuscar(root) {
     selectFiltro('Responsable', filtros.responsable, EJECUTORES_DEFAULT, (v) => { filtros.responsable = v; MP.uiState.filtros = filtros; saveUiState(); renderView('buscar'); }),
     selectFiltro('Causal activa', filtros.causalActiva, ['C1','C2','C3','C4','C5','C6','C7','C8'], (v) => { filtros.causalActiva = v; MP.uiState.filtros = filtros; saveUiState(); renderView('buscar'); }),
     checkboxFiltro('Con pendientes', filtros.conPend, (v) => { filtros.conPend = v; MP.uiState.filtros = filtros; saveUiState(); renderView('buscar'); }),
-    Object.keys(filtros).length ? el('button', { class: 'btn btn-ghost btn-sm', html: icon('x',12) + ' Limpiar (' + Object.values(filtros).filter(Boolean).length + ')',
+    Object.keys(filtros).filter((k) => filtros[k]).length ? el('button', { class: 'btn btn-ghost btn-sm', html: icon('x',12) + ' Limpiar (' + Object.values(filtros).filter(Boolean).length + ')',
       onclick: () => { MP.uiState.filtros = {}; saveUiState(); renderView('buscar'); } }) : null
   ]));
 
@@ -1828,6 +1837,15 @@ function checkboxFiltro(label, checked, onChange) {
   w.appendChild(c); w.appendChild(el('span', { text: label }));
   return w;
 }
+function textoFiltro(label, value, onChange) {
+  const wrap = el('label', { class: 'row tiny', style: 'gap:6px' });
+  wrap.appendChild(el('span', { class: 'muted', text: label + ':' }));
+  const inp = el('input', { class: 'input', style: 'width:140px', value: value || '', placeholder: '—' });
+  const apply = debounce(() => onChange(inp.value.trim()), 250);
+  inp.addEventListener('input', apply);
+  wrap.appendChild(inp);
+  return wrap;
+}
 
 function filtrarEquipos(q, filtros) {
   const eqs = MP.equipos.data || [];
@@ -1875,6 +1893,12 @@ function filtrarEquipos(q, filtros) {
       const arr = pendByKey[eq.key] || [];
       if (!arr.some((p) => p.estado === 'abierto')) return false;
     }
+    // Filtros de texto directos (UI) — se combinan con los operadores del buscador global
+    if (filtros.inv && normalize(eq.inventario).indexOf(normalize(filtros.inv)) < 0) return false;
+    if (filtros.serie && normalize(eq.serie).indexOf(normalize(filtros.serie)) < 0) return false;
+    if (filtros.carpeta && normalize(eq.carpeta).indexOf(normalize(filtros.carpeta)) < 0) return false;
+    if (filtros.marca && normalize(eq.marca).indexOf(normalize(filtros.marca)) < 0) return false;
+    if (filtros.modelo && normalize(eq.modelo).indexOf(normalize(filtros.modelo)) < 0) return false;
     if (parsed.inv && normalize(eq.inventario).indexOf(parsed.inv) < 0) return false;
     if (parsed.serie && normalize(eq.serie).indexOf(parsed.serie) < 0) return false;
     if (parsed.servicio && normalize(eq.servicio).indexOf(parsed.servicio) < 0) return false;
