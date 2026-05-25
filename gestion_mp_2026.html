@@ -1889,6 +1889,22 @@ function filtrarEquipos(q, filtros) {
   });
 }
 
+function estadoEquipoCalc(eq) {
+  // Recorre los meses del registro buscando el resultado más reciente
+  let ultR = '';
+  for (let m = 11; m >= 0; m--) {
+    const r = (eq.mesesReg[m] || {}).r;
+    if (r) { ultR = r; break; }
+  }
+  if (ultR === 'Baja' || /baja/i.test(eq.enuBaja || '')) return { label: 'Baja', cls: 'no-op' };
+  if (ultR === 'FS') return { label: 'Fuera de servicio', cls: 'no-op' };
+  if (ultR === 'C2') return { label: 'En servicio técnico', cls: 'servicio' };
+  if (ultR === 'C3') return { label: 'Espera repuesto', cls: 'servicio' };
+  if (ultR === 'C4') return { label: 'En préstamo', cls: 'servicio' };
+  if (ultR === 'NU') return { label: 'No ubicable', cls: 'no-op' };
+  return { label: eq.enuBaja || 'Operativo', cls: 'operativo' };
+}
+
 function equipoCard(eq, q) {
   const card = el('div', { class: 'eq-card' });
   function hl(text) {
@@ -1909,11 +1925,20 @@ function equipoCard(eq, q) {
       mesesHtml += '<span title="' + MESES[m] + (r ? ' ' + r : '') + '" style="margin:0 2px">' + codigoBadge(code) + '</span>';
     }
   }
+  // Pendientes abiertos
+  const pends = (pendientesByKey()[eq.key] || []).filter((p) => p.estado === 'abierto');
+  const venc = pends.filter((p) => p.fechaCompromiso && new Date(p.fechaCompromiso) < new Date(todayISO())).length;
+  // Estado del equipo
+  const est = estadoEquipoCalc(eq);
+  // Línea principal con badges (familia + estado + pendientes)
+  const badges = '<span class="badge badge-neutral">' + escapeHtml(eq.familiaCalc) + '</span>' +
+    ' <span class="state-pill ' + est.cls + '"><span class="dot ' + (est.cls === 'operativo' ? 'dot-green' : est.cls === 'servicio' ? 'dot-orange' : 'dot-red') + '"></span>' + escapeHtml(est.label) + '</span>' +
+    (pends.length ? ' <span class="badge ' + (venc ? 'badge-danger' : 'badge-warning') + '">' + icon('list',10) + ' ' + pends.length + (venc ? ' (' + venc + ' venc.)' : '') + '</span>' : '');
   card.innerHTML = '<div class="row-between">' +
-    '<div class="eq-name">' + hl(eq.equipo) + ' <span class="badge badge-neutral">' + escapeHtml(eq.familiaCalc) + '</span></div>' +
+    '<div class="eq-name">' + hl(eq.equipo) + ' ' + badges + '</div>' +
     '<div class="row tiny muted">' + mesesHtml + '</div>' +
     '</div>' +
-    '<div class="eq-meta">Inv: <strong>' + hl(eq.inventario) + '</strong> · Serie: ' + hl(eq.serie) + ' · ' + hl(eq.marca + ' ' + eq.modelo) + '</div>' +
+    '<div class="eq-meta">Inv: <strong>' + hl(eq.inventario) + '</strong> · Carpeta: <strong>' + hl(eq.carpeta || '—') + '</strong> · Serie: ' + hl(eq.serie) + ' · ' + hl(eq.marca + ' ' + eq.modelo) + '</div>' +
     '<div class="eq-meta">' + hl(eq.servicio) + (eq.ubicacion ? ' · ' + hl(eq.ubicacion) : '') + '</div>';
   card.addEventListener('click', () => abrirFichaEquipo(eq.key));
   return card;
