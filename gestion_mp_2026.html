@@ -724,6 +724,12 @@ details.tutorial ol { margin: var(--sp-2) 0 0; padding-left: var(--sp-5); }
 @media (max-width: 1023px) {
   .header-search { display: none; }
 }
+
+/* Recorder button */
+#recBtn.rec-active { background: var(--c-danger); color: white; }
+#recBtn.rec-active:hover { background: #b91c1c; }
+.rec-dot { width: 9px; height: 9px; border-radius: 50%; background: white; box-shadow: 0 0 0 0 rgba(255,255,255,.6); animation: recpulse 1.4s var(--ease) infinite; flex-shrink: 0; }
+@keyframes recpulse { 0% { box-shadow: 0 0 0 0 rgba(255,255,255,.7); } 70% { box-shadow: 0 0 0 8px rgba(255,255,255,0); } 100% { box-shadow: 0 0 0 0 rgba(255,255,255,0); } }
 </style>
 </head>
 <body>
@@ -954,6 +960,7 @@ function icon(name, size) {
 const Toast = {
   show(msg, opts) {
     opts = opts || {};
+    if (typeof Recorder !== 'undefined') Recorder.log('toast', { msg: String(msg).slice(0, 200), type: opts.type || 'info' });
     const t = el('div', { class: 'toast' + (opts.type ? ' ' + opts.type : '') });
     t.innerHTML = '<span>' + escapeHtml(msg) + '</span>';
     let timer; let resolved = false;
@@ -1006,12 +1013,166 @@ function openModal(content, opts) {
   if (typeof content === 'string') m.innerHTML = content;
   else m.appendChild(content);
   b.appendChild(m);
-  const close = () => { b.classList.add('closing'); b.remove(); };
+  // Captura titulo para grabacion
+  let title = '';
+  try { const t = m.querySelector('.modal-title'); if (t) title = (t.innerText || '').trim().slice(0, 80); } catch (e) {}
+  if (typeof Recorder !== 'undefined') Recorder.log('modal_open', { title, size: opts.size || 'md' });
+  const close = () => {
+    if (typeof Recorder !== 'undefined') Recorder.log('modal_close', { title });
+    b.classList.add('closing'); b.remove();
+  };
   b.addEventListener('click', (e) => { if (e.target === b && opts.dismissable !== false) close(); });
   m.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', close));
   document.getElementById('modalRoot').appendChild(b);
   return { backdrop: b, modal: m, close };
 }
+
+/* ===== Recorder: graba clicks, vistas, modales, toasts y errores ===== */
+const REC_LS = 'mp2026_recording';
+const Recorder = {
+  active: false,
+  events: [],
+  startedAt: 0,
+  timerInt: null,
+  MAX: 10000,
+  init() {
+    const saved = lsGet(REC_LS, null);
+    if (saved && saved.active) {
+      this.active = true;
+      this.events = saved.events || [];
+      this.startedAt = saved.startedAt || Date.now();
+      this._startTimer();
+    }
+    this._updateBtn();
+    // Listeners globales (siempre activos; solo se loguea si active)
+    document.addEventListener('click', (e) => {
+      if (!this.active) return;
+      const t = e.target.closest('button, a, [role=button], .nav-item, .row-link, .eq-card, .month-cell, .cal-month, .chart-row, .card-interactive, .tab');
+      if (!t) return;
+      // No grabar el propio botón de grabación
+      if (t.id === 'recBtn' || t.closest('#recBtn')) return;
+      // Sanitizar input que pueda contener token
+      const tag = t.tagName.toLowerCase();
+      const txt = (t.innerText || t.textContent || '').trim().slice(0, 80);
+      const sel = this._selectorOf(t);
+      this.log('click', { tag, sel, text: txt, x: e.clientX, y: e.clientY });
+    }, true);
+    document.addEventListener('keydown', (e) => {
+      if (!this.active) return;
+      // No grabar tecleo de inputs/textareas
+      if (e.target && /INPUT|TEXTAREA|SELECT/i.test(e.target.tagName)) return;
+      if (e.key.length === 1 || /^(Escape|Enter|Tab|F\d|Arrow|Home|End)/.test(e.key)) {
+        this.log('keydown', { key: e.key, ctrl: e.ctrlKey, meta: e.metaKey, alt: e.altKey, shift: e.shiftKey });
+      }
+    }, true);
+    window.addEventListener('error', (e) => {
+      if (!this.active) return;
+      this.log('error', { msg: String(e.message || ''), src: String(e.filename || '').slice(-80), line: e.lineno, col: e.colno });
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+      if (!this.active) return;
+      this.log('error', { msg: 'unhandled_rejection: ' + String((e.reason && e.reason.message) || e.reason || '').slice(0, 200) });
+    });
+  },
+  _selectorOf(t) {
+    if (!t) return '';
+    if (t.id) return '#' + t.id;
+    const cls = (t.className || '').toString().split(/\s+/).filter(Boolean).slice(0, 3).join('.');
+    const dv = t.dataset && t.dataset.vista ? '[data-vista=' + t.dataset.vista + ']' : '';
+    return t.tagName.toLowerCase() + (cls ? '.' + cls : '') + dv;
+  },
+  toggle() {
+    if (this.active) this.stop();
+    else this.start();
+  },
+  start() {
+    this.active = true;
+    this.events = [];
+    this.startedAt = Date.now();
+    this.log('session_start', { ua: navigator.userAgent.slice(0, 200), screen: window.innerWidth + 'x' + window.innerHeight, view: currentView || '', appVer: VERSION, ts: new Date().toISOString() });
+    this._persist();
+    this._startTimer();
+    this._updateBtn();
+    Toast.show('Grabación iniciada · Tu actividad se registra localmente');
+  },
+  stop() {
+    if (!this.active) return;
+    this.log('session_end', { ts: new Date().toISOString() });
+    this.active = false;
+    clearInterval(this.timerInt); this.timerInt = null;
+    lsDel(REC_LS);
+    this._updateBtn();
+    this._download();
+  },
+  log(type, detail) {
+    if (!this.active) return;
+    if (this.events.length >= this.MAX) {
+      this.events.push({ ts: Date.now() - this.startedAt, type: 'truncated', detail: { max: this.MAX } });
+      this.active = false;
+      this._updateBtn();
+      Toast.warning('Grabación detenida: límite de eventos alcanzado');
+      this._download();
+      return;
+    }
+    this.events.push({ ts: Date.now() - this.startedAt, type, view: currentView || '', detail: detail || {} });
+    // Persistencia debounced — no en cada evento
+    if (!this._persistPending) {
+      this._persistPending = setTimeout(() => { this._persistPending = null; this._persist(); }, 1000);
+    }
+  },
+  _persist() {
+    try { lsSet(REC_LS, { active: this.active, startedAt: this.startedAt, events: this.events }); } catch (e) {}
+  },
+  _startTimer() {
+    clearInterval(this.timerInt);
+    this.timerInt = setInterval(() => this._updateBtn(), 1000);
+  },
+  _updateBtn() {
+    const btn = document.getElementById('recBtn');
+    if (!btn) return;
+    if (this.active) {
+      const sec = Math.floor((Date.now() - this.startedAt) / 1000);
+      const mm = String(Math.floor(sec / 60)).padStart(2, '0');
+      const ss = String(sec % 60).padStart(2, '0');
+      btn.classList.add('rec-active');
+      btn.dataset.tip = 'Grabando ' + mm + ':' + ss + ' · ' + this.events.length + ' eventos · click para detener y descargar';
+      btn.innerHTML = '<span style="display:inline-flex;align-items:center;gap:4px"><span class="rec-dot"></span><span class="tiny" style="font-variant-numeric:tabular-nums">' + mm + ':' + ss + '</span></span>';
+    } else {
+      btn.classList.remove('rec-active');
+      btn.dataset.tip = 'Grabar sesión (clicks, navegación, errores)';
+      btn.innerHTML = icon('circle', 16);
+    }
+  },
+  _download() {
+    const data = {
+      schema: 'mp2026_recording_v1',
+      appVer: VERSION,
+      startedAt: new Date(this.startedAt).toISOString(),
+      endedAt: new Date().toISOString(),
+      duracionSeg: Math.round((Date.now() - this.startedAt) / 1000),
+      ua: navigator.userAgent,
+      screen: window.innerWidth + 'x' + window.innerHeight,
+      configIncompleta: configIncompleta(),
+      queueSize: MP.queue.length,
+      stats: this._stats(),
+      events: this.events
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'mp2026_grabacion_' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.json';
+    a.click();
+    Toast.success('Grabación guardada (' + this.events.length + ' eventos · ' + Math.round(blob.size / 1024) + ' KB)');
+  },
+  _stats() {
+    const byType = {}, byView = {};
+    this.events.forEach((e) => {
+      byType[e.type] = (byType[e.type] || 0) + 1;
+      if (e.view) byView[e.view] = (byView[e.view] || 0) + 1;
+    });
+    return { totalEventos: this.events.length, porTipo: byType, porVista: byView };
+  }
+};
 
 /* ===== Estado global ===== */
 const MP = {
@@ -1367,6 +1528,10 @@ function renderHeader() {
   const sp = el('span', { id: 'syncPill', class: 'sync-pill', tooltip: 'Sincronización' });
   sp.addEventListener('click', () => abrirModalCola());
   h.appendChild(sp);
+  // recorder
+  const rec = el('button', { id: 'recBtn', class: 'btn btn-icon btn-ghost tooltip', dataset: { tip: 'Grabar sesión (clicks, navegación, errores)' }, html: icon('circle',16) });
+  rec.addEventListener('click', () => Recorder.toggle());
+  h.appendChild(rec);
   // scan
   const scanBtn = el('button', { class: 'btn btn-icon btn-ghost tooltip', dataset: { tip: 'Escanear código (cámara)' }, html: icon('scan') });
   scanBtn.addEventListener('click', () => abrirEscaner());
@@ -1404,6 +1569,7 @@ function renderShell() {
 /* ===== Router ===== */
 let currentView = null;
 function navigate(vista) {
+  if (typeof Recorder !== 'undefined') Recorder.log('navigate', { from: currentView, to: vista });
   if (vista === currentView) { renderView(vista); return; }
   currentView = vista;
   MP.uiState.vista = vista;
@@ -3604,6 +3770,7 @@ async function boot() {
   }
   bindAtajos();
   startHealthCheck();
+  Recorder.init();
   // procesar cola al volver online
   window.addEventListener('online', () => Queue.process());
   // autosave scroll
