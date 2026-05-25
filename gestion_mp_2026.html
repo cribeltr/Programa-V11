@@ -2031,7 +2031,8 @@ function pendienteCard(p, eq) {
     '<div class="tiny muted">' + (eq ? icon('equipment',12) + ' ' + escapeHtml(eq.equipo + ' · ' + eq.inventario) : '<em>Pendiente suelto</em>') + '</div>' +
     '<div class="tiny mt-2">' + icon('user',12) + ' ' + escapeHtml(p.ejecutor || '—') + (p.fechaCompromiso ? ' · ' + icon('calendar',12) + ' ' + fmtFecha(p.fechaCompromiso) : '') +
     (vencido ? ' <span class="badge badge-danger">' + diasV + 'd vencido</span>' : '') + '</div>' +
-    ((p.etiquetas && p.etiquetas.length) ? '<div class="row mt-2">' + p.etiquetas.map((t) => '<span class="tag">' + escapeHtml(t) + '</span>').join('') + '</div>' : '');
+    ((p.etiquetas && p.etiquetas.length) ? '<div class="row mt-2">' + p.etiquetas.map((t) => '<span class="tag">' + escapeHtml(t) + '</span>').join('') + '</div>' : '') +
+    ((p.actualizaciones && p.actualizaciones.length) ? '<div class="tiny muted mt-2">' + icon('file-text',12) + ' ' + p.actualizaciones.length + ' actualización' + (p.actualizaciones.length === 1 ? '' : 'es') + '</div>' : '');
   c.addEventListener('click', () => abrirModalPendiente(p));
   return c;
 }
@@ -2724,12 +2725,51 @@ function abrirModalPendiente(p) {
     });
     tcard.appendChild(el('button', { class: 'btn btn-sm btn-secondary', html: icon('plus',12) + ' Agregar tarea', onclick: () => { p.tareas = p.tareas || []; p.tareas.push({ texto: '', done: false }); pintar(); } }));
     form.appendChild(tcard);
-    if (!isNew && p.actualizaciones && p.actualizaciones.length) {
-      const ac = el('div', { class: 'card' });
-      ac.innerHTML = '<h3>Actualizaciones</h3>';
-      p.actualizaciones.forEach((a) => ac.innerHTML += '<div class="tiny mb-2"><strong>' + fmtFecha(a.fecha) + ':</strong> ' + escapeHtml(a.texto) + '</div>');
-      form.appendChild(ac);
+    // Actualizaciones (siempre visible: para agregar comentarios al historial)
+    const ac = el('div', { class: 'card' });
+    ac.innerHTML = '<h3>Actualizaciones</h3>' +
+      '<p class="tiny muted" style="margin:0 0 8px">Registra avances, llamadas, gestiones realizadas. Quedan en el historial del pendiente.</p>';
+    const acList = el('div', { class: 'stack' });
+    function pintarUpdates() {
+      acList.innerHTML = '';
+      if (!p.actualizaciones || !p.actualizaciones.length) {
+        acList.appendChild(el('div', { class: 'tiny muted', text: 'Sin actualizaciones aún.' }));
+        return;
+      }
+      const ordered = (p.actualizaciones || []).slice().sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
+      ordered.forEach((a) => {
+        const it = el('div', { class: 'card', style: 'padding:8px 12px;background:var(--c-bg-soft);border:none' });
+        const head = el('div', { class: 'row-between mb-2' }, [
+          el('div', { class: 'tiny' }, [el('strong', { text: fmtDateTime(a.fecha) }), el('span', { class: 'muted', text: a.usuario ? ' · ' + a.usuario : '' })]),
+          el('button', { class: 'btn btn-sm btn-ghost', html: icon('trash',12), onclick: () => {
+            p.actualizaciones = (p.actualizaciones || []).filter((x) => x.id !== a.id);
+            saveDraft(); pintarUpdates();
+          } })
+        ]);
+        it.appendChild(head);
+        it.appendChild(el('div', { class: 'tiny', text: a.texto }));
+        acList.appendChild(it);
+      });
     }
+    ac.appendChild(acList);
+
+    const addRow = el('div', { class: 'row mt-3' });
+    const ta = el('textarea', { class: 'textarea', placeholder: 'Nueva actualización (Ctrl+Enter para guardar)', style: 'flex:1;min-height:60px' });
+    const btnAdd = el('button', { class: 'btn btn-primary', html: icon('plus',12) + ' Agregar', onclick: () => {
+      const txt = ta.value.trim();
+      if (!txt) { Toast.warning('Escribe el comentario antes de agregar'); return; }
+      p.actualizaciones = p.actualizaciones || [];
+      p.actualizaciones.push({ id: uid(), fecha: new Date().toISOString(), texto: txt, usuario: '' });
+      ta.value = '';
+      saveDraft();
+      pintarUpdates();
+    } });
+    ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); btnAdd.click(); } });
+    addRow.appendChild(ta); addRow.appendChild(btnAdd);
+    ac.appendChild(addRow);
+
+    pintarUpdates();
+    form.appendChild(ac);
     // bind inputs
     form.querySelectorAll('[data-key]').forEach((inp) => {
       inp.addEventListener('input', () => {
