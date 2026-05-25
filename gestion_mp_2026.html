@@ -1013,16 +1013,18 @@ function openModal(content, opts) {
   if (typeof content === 'string') m.innerHTML = content;
   else m.appendChild(content);
   b.appendChild(m);
-  // Captura titulo para grabacion
   let title = '';
   try { const t = m.querySelector('.modal-title'); if (t) title = (t.innerText || '').trim().slice(0, 80); } catch (e) {}
   if (typeof Recorder !== 'undefined') Recorder.log('modal_open', { title, size: opts.size || 'md' });
+  let closed = false;
   const close = () => {
+    if (closed) return; closed = true;
     if (typeof Recorder !== 'undefined') Recorder.log('modal_close', { title });
-    b.classList.add('closing'); b.remove();
+    try { if (typeof opts.onClose === 'function') opts.onClose(); } catch (e) {}
+    b.remove();
   };
   b.addEventListener('click', (e) => { if (e.target === b && opts.dismissable !== false) close(); });
-  m.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', close));
+  m.querySelectorAll('[data-close]').forEach((btn) => btn.addEventListener('click', close));
   document.getElementById('modalRoot').appendChild(b);
   return { backdrop: b, modal: m, close };
 }
@@ -1051,9 +1053,17 @@ const Recorder = {
       if (!t) return;
       // No grabar el propio botón de grabación
       if (t.id === 'recBtn' || t.closest('#recBtn')) return;
-      // Sanitizar input que pueda contener token
       const tag = t.tagName.toLowerCase();
-      const txt = (t.innerText || t.textContent || '').trim().slice(0, 80);
+      // Texto: para botones/links usar el texto directo; para tarjetas usar el primer titulo
+      let txt = '';
+      if (tag === 'button' || tag === 'a') {
+        txt = (t.innerText || t.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+      } else {
+        // Tomar primer nodo de texto significativo (titulo de tarjeta)
+        const head = t.querySelector('.eq-name, .modal-title, strong, h3, .stat-label');
+        if (head) txt = (head.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+        else txt = (t.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+      }
       const sel = this._selectorOf(t);
       this.log('click', { tag, sel, text: txt, x: e.clientX, y: e.clientY });
     }, true);
@@ -2868,11 +2878,7 @@ function abrirFichaEquipo(key) {
   ft.appendChild(el('button', { class: 'btn btn-primary', text: 'Cerrar', dataset: { close: '1' } }));
   root.appendChild(ft);
 
-  const m = openModal(root, { size: 'lg' });
-  const oldClose = m.close;
-  m.close = () => { MP.uiState.modalAbierto = null; saveUiState(); oldClose(); };
-  m.backdrop.addEventListener('click', (e) => { if (e.target === m.backdrop) m.close(); });
-  $$('[data-close]', m.modal).forEach((b) => b.addEventListener('click', m.close));
+  const m = openModal(root, { size: 'lg', onClose: () => { MP.uiState.modalAbierto = null; saveUiState(); } });
 }
 
 function abrirModalMesEquipo(eq, m) {
@@ -3067,7 +3073,6 @@ function abrirModalPendiente(p) {
   }
   ft.appendChild(el('button', { class: 'btn btn-ghost', text: 'Cancelar', dataset: { close: '1' } }));
   ft.appendChild(el('button', { class: 'btn btn-primary', text: 'Guardar', onclick: () => {
-    // Validaciones
     if (!p.descripcion || !p.descripcion.trim()) { Toast.danger('La descripción es obligatoria'); return; }
     p.etiquetas = (form.querySelector('[data-key="_etiquetasStr"]') ? form.querySelector('[data-key="_etiquetasStr"]').value : '').split(',').map((s) => s.trim()).filter(Boolean);
     delete p._etiquetasStr;
@@ -3078,9 +3083,17 @@ function abrirModalPendiente(p) {
     saveCache(LS.cachePend, MP.pendientes);
     Queue.add('savePendiente', { pendiente: p }, { localId: p.id });
     delete MP.drafts[draftKey]; lsSet(LS.drafts, MP.drafts);
-    Toast.success('Guardado localmente. Sincronizando…');
+    Toast.success((isNew ? 'Pendiente creado' : 'Pendiente actualizado') + ' · Sincronizando…');
     document.querySelectorAll('.modal-backdrop').forEach((b, i, all) => { if (i === all.length - 1) b.remove(); });
-    renderView(currentView);
+    // Si estabamos en la ficha de un equipo, refrescarla para mostrar el nuevo pendiente
+    const remain = document.querySelectorAll('.modal-backdrop');
+    if (remain.length && p.equipoKey) {
+      // Hay otro modal abajo: lo cerramos y reabrimos la ficha (refresh)
+      remain.forEach((b) => b.remove());
+      abrirFichaEquipo(p.equipoKey);
+    } else {
+      renderView(currentView);
+    }
   } }));
   root.appendChild(ft);
   openModal(root);
