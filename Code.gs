@@ -52,7 +52,7 @@ const EJECUTORES_DEFAULT = [
 const CODIGOS_PMP = ['X', 'R', 'RA', 'PM'];
 const CODIGOS_REG = ['Si', 'Si-RA', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C8', 'FS', 'Baja', 'NU'];
 const PRIORIDADES = ['alta', 'media', 'baja'];
-const ESTADOS_PEND = ['abierto', 'cerrado'];
+const ESTADOS_PEND = ['abierto', 'en_progreso', 'cerrado'];
 const TIPOS_EVENTO = ['mp', 'envio', 'solicitud', 'recepcion', 'reparacion'];
 const TIPOS_INCONS = ['si_desaparecida', 'si_a_causal', 'causal_a_si', 'causal_cambiada', 'override_no_reflejado', 'equipo_desaparecido', 'equipo_nuevo', 'cambio_catastro', 'baja_nueva', 'resultado_aparecido'];
 

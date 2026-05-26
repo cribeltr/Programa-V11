@@ -1382,8 +1382,8 @@ function updateSyncIndicator() {
   if (conflict > 0 && cnt === conflict) { pill.classList.add('err'); pill.innerHTML = icon('cloud-off',14) + '<span>' + cnt + ' conflicto' + (cnt > 1 ? 's' : '') + '</span>'; }
   else if (cnt > 0) { pill.classList.add('pending'); pill.innerHTML = '<span class="dot dot-orange"></span><span>' + cnt + ' en cola</span>'; }
   else { pill.classList.add('ok'); pill.innerHTML = icon('check-circle',14) + '<span>Sincronizado</span>'; }
-  // sidebar badge pendientes vencidos
-  const pendVen = (MP.pendientes.data || []).filter((p) => p.estado === 'abierto' && p.fechaCompromiso && new Date(p.fechaCompromiso) < new Date(todayISO())).length;
+  // sidebar badge pendientes vencidos (abiertos o en progreso)
+  const pendVen = (MP.pendientes.data || []).filter((p) => p.estado !== 'cerrado' && p.fechaCompromiso && new Date(p.fechaCompromiso) < new Date(todayISO())).length;
   $$('.nav-item[data-vista="pendientes"] .nav-badge').forEach((b) => { if (pendVen > 0) { b.textContent = pendVen; b.style.display = ''; } else b.style.display = 'none'; });
 }
 
@@ -1626,7 +1626,7 @@ function renderView(vista) {
 /* ===== Vista INICIO ===== */
 function renderInicio(root) {
   const k = MP.kpis.data || { programadas: 0, programadasMes: 0, ejecutadas: 0, ejecutadasMes: 0, pendientes: 0, fsbn: 0, porMes: [], cumplimiento: 0 };
-  const pendVencidos = (MP.pendientes.data || []).filter((p) => p.estado === 'abierto' && p.fechaCompromiso && new Date(p.fechaCompromiso) < new Date(todayISO())).length;
+  const pendVencidos = (MP.pendientes.data || []).filter((p) => p.estado !== 'cerrado' && p.fechaCompromiso && new Date(p.fechaCompromiso) < new Date(todayISO())).length;
   const enServicio = (MP.equipos.data || []).filter((eq) => {
     if (eq.isSlot) return false;
     for (let m = 0; m < 12; m++) { if ((eq.mesesReg[m] || {}).r === 'C2') return true; }
@@ -1648,6 +1648,9 @@ function renderInicio(root) {
       botonCompararSnapshot()
     ])
   ]));
+
+  // Mi día / Mi semana
+  root.appendChild(renderMiDiaSemana());
 
   // KPIs grandes
   const kpis = el('div', { class: 'kpi-grid mb-4' });
@@ -1683,6 +1686,81 @@ function renderInicio(root) {
   });
   fam.appendChild(famRow);
   root.appendChild(fam);
+}
+
+function renderMiDiaSemana() {
+  const today = todayISO();
+  const todayDate = new Date(today);
+  const lun7 = new Date(todayDate); lun7.setDate(lun7.getDate() + 7);
+  const activos = (MP.pendientes.data || []).filter((p) => p.estado !== 'cerrado');
+  const vencidos = activos.filter((p) => p.fechaCompromiso && new Date(p.fechaCompromiso) < todayDate);
+  const hoy = activos.filter((p) => p.fechaCompromiso && p.fechaCompromiso === today);
+  const semana = activos.filter((p) => {
+    if (!p.fechaCompromiso) return false;
+    const f = new Date(p.fechaCompromiso);
+    return f > todayDate && f <= lun7;
+  });
+  const sinFecha = activos.filter((p) => !p.fechaCompromiso);
+  // Ordenar cada bloque por prioridad alta primero, luego fecha
+  const ord = (a, b) => {
+    const pa = ({ alta: 0, media: 1, baja: 2 })[a.prioridad] ?? 1;
+    const pb = ({ alta: 0, media: 1, baja: 2 })[b.prioridad] ?? 1;
+    if (pa !== pb) return pa - pb;
+    return (a.fechaCompromiso || '').localeCompare(b.fechaCompromiso || '');
+  };
+  vencidos.sort(ord); hoy.sort(ord); semana.sort(ord);
+
+  const wrap = el('div', { class: 'mb-4' });
+  const head = el('div', { class: 'row-between mb-2' }, [
+    el('h2', { html: icon('flag',18) + ' Mi día / Mi semana', style: 'margin:0;display:flex;align-items:center;gap:8px' }),
+    el('button', { class: 'btn btn-sm btn-secondary', html: icon('plus',12) + ' Nuevo pendiente', onclick: () => abrirModalPendiente(null) })
+  ]);
+  wrap.appendChild(head);
+
+  const cols = el('div', { style: 'display:grid;gap:var(--sp-3);grid-template-columns:repeat(auto-fit, minmax(280px, 1fr))' });
+  cols.appendChild(colDia('Vencidos', vencidos, '#dc2626', 'flag', 'No tienes pendientes vencidos. 👏'));
+  cols.appendChild(colDia('Hoy', hoy, '#ea8a0e', 'clock', 'Sin pendientes para hoy.'));
+  cols.appendChild(colDia('Esta semana', semana, '#1f6feb', 'calendar', 'Nada agendado para los próximos 7 días.'));
+  if (sinFecha.length) cols.appendChild(colDia('Sin fecha', sinFecha, '#6b7280', 'calendar', '', true));
+  wrap.appendChild(cols);
+  return wrap;
+}
+
+function colDia(titulo, items, color, ico, empty, secundaria) {
+  const c = el('div', { class: 'card', style: 'padding:12px;border-top:3px solid ' + color + ';display:flex;flex-direction:column;gap:8px;max-height:380px;overflow:hidden' });
+  c.appendChild(el('div', { class: 'row-between', style: 'flex-shrink:0' }, [
+    el('div', { class: 'row', style: 'gap:6px' }, [el('span', { html: icon(ico,14), style: 'color:' + color }), el('strong', { text: titulo })]),
+    el('span', { class: 'badge', style: 'background:' + color + ';color:white', text: items.length })
+  ]));
+  if (!items.length) {
+    c.appendChild(el('div', { class: 'tiny muted center', style: 'padding:20px 0', text: empty || 'Sin pendientes.' }));
+    return c;
+  }
+  const lista = el('div', { style: 'overflow-y:auto;display:flex;flex-direction:column;gap:6px;padding-right:4px' });
+  const eqMap = equiposByKey();
+  items.slice(0, 50).forEach((p) => lista.appendChild(miniPendCard(p, eqMap[p.equipoKey])));
+  if (items.length > 50) lista.appendChild(el('div', { class: 'tiny muted center', text: '+' + (items.length - 50) + ' más' }));
+  c.appendChild(lista);
+  return c;
+}
+
+function miniPendCard(p, eq) {
+  const c = el('div', { style: 'background:var(--c-bg-soft);border-radius:var(--rd-md);padding:8px 10px;cursor:pointer;border-left:3px solid ' +
+    (p.prioridad === 'alta' ? 'var(--c-danger)' : p.prioridad === 'media' ? 'var(--c-warning)' : 'var(--c-border-strong)') });
+  c.innerHTML = '<div class="row-between">' +
+    '<div style="font-weight:var(--fw-m);font-size:var(--fs-sm);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px">' + escapeHtml(p.descripcion) + '</div>' +
+    estadoPendDot(p) + '</div>' +
+    (eq ? '<div class="tiny muted">' + escapeHtml(eq.inventario || eq.id) + ' · ' + escapeHtml(eq.equipo) + '</div>' : '<div class="tiny muted"><em>Suelto</em></div>') +
+    '<div class="tiny" style="margin-top:2px">' + escapeHtml(p.ejecutor || 'sin asignar') + (p.fechaCompromiso ? ' · ' + fmtFecha(p.fechaCompromiso) : '') + '</div>';
+  const qa = el('div', { class: 'row mt-2', style: 'gap:4px' });
+  const noProp = (fn) => (e) => { e.stopPropagation(); fn(); };
+  qa.appendChild(el('button', { class: 'btn btn-sm btn-success tooltip', dataset: { tip: 'Cerrar' }, html: icon('check',12), onclick: noProp(() => cambiarEstadoPendiente(p, 'cerrado')) }));
+  if (p.estado !== 'en_progreso') qa.appendChild(el('button', { class: 'btn btn-sm btn-secondary tooltip', dataset: { tip: 'En progreso' }, html: icon('play',12), onclick: noProp(() => cambiarEstadoPendiente(p, 'en_progreso')) }));
+  qa.appendChild(el('button', { class: 'btn btn-sm btn-ghost tooltip', dataset: { tip: '+1 día' }, html: '+1d', onclick: noProp(() => posponerPendiente(p, 1)) }));
+  qa.appendChild(el('button', { class: 'btn btn-sm btn-ghost tooltip', dataset: { tip: '+1 semana' }, html: '+7d', onclick: noProp(() => posponerPendiente(p, 7)) }));
+  c.appendChild(qa);
+  c.addEventListener('click', () => abrirModalPendiente(p));
+  return c;
 }
 
 function kpiCard(label, value, extra, ico, onClick) {
@@ -2180,12 +2258,28 @@ function renderPendientes(root) {
 }
 
 function renderPendientesOperativos(root, lista) {
-  const filtros = MP.uiState.pendFiltros || { estado: 'abiertos' };
+  const filtros = MP.uiState.pendFiltros || { estado: 'activos' };
   const filtroVista = MP.uiState.pendFiltro || '';
+  const txtBusq = MP.uiState.pendBusqueda || '';
   const card = el('div', { class: 'card mb-3' });
+  // Caja de búsqueda
+  const sbox = el('div', { class: 'input-group mb-2' });
+  sbox.innerHTML = '<span class="ig-icon">' + icon('search',14) + '</span>';
+  const sinp = el('input', { class: 'input', placeholder: 'Buscar en descripción, actualizaciones, etiquetas…', value: txtBusq });
+  sinp.addEventListener('input', debounce(() => {
+    MP.uiState.pendBusqueda = sinp.value;
+    saveUiState();
+    renderView('pendientes');
+  }, 250));
+  sbox.appendChild(sinp);
+  card.appendChild(sbox);
   const row = el('div', { class: 'row' }, [
     selectFiltro('Estado', filtros.estado, [
-      { value: 'abiertos', label: 'Abiertos' },{ value: 'cerrados', label: 'Cerrados' },{ value: 'todos', label: 'Todos' }
+      { value: 'activos', label: 'Activos (abiertos + en progreso)' },
+      { value: 'abiertos', label: 'Abiertos' },
+      { value: 'en_progreso', label: 'En progreso' },
+      { value: 'cerrados', label: 'Cerrados' },
+      { value: 'todos', label: 'Todos' }
     ], (v) => { filtros.estado = v; MP.uiState.pendFiltros = filtros; renderView('pendientes'); }),
     selectFiltro('Responsable', filtros.responsable, EJECUTORES_DEFAULT, (v) => { filtros.responsable = v; MP.uiState.pendFiltros = filtros; renderView('pendientes'); }),
     selectFiltro('Prioridad', filtros.prioridad, ['alta','media','baja'], (v) => { filtros.prioridad = v; MP.uiState.pendFiltros = filtros; renderView('pendientes'); }),
@@ -2199,14 +2293,26 @@ function renderPendientesOperativos(root, lista) {
   root.appendChild(card);
 
   function filter(arr) {
+    const nq = normalize(txtBusq);
     return arr.filter((p) => {
+      if (filtros.estado === 'activos' && p.estado === 'cerrado') return false;
       if (filtros.estado === 'abiertos' && p.estado !== 'abierto') return false;
+      if (filtros.estado === 'en_progreso' && p.estado !== 'en_progreso') return false;
       if (filtros.estado === 'cerrados' && p.estado !== 'cerrado') return false;
       if (filtros.responsable && p.ejecutor !== filtros.responsable) return false;
       if (filtros.prioridad && p.prioridad !== filtros.prioridad) return false;
       if (filtroVista === 'vencidos') {
         if (!p.fechaCompromiso) return false;
+        if (p.estado === 'cerrado') return false;
         if (new Date(p.fechaCompromiso) >= new Date(todayISO())) return false;
+      }
+      if (nq) {
+        const blob = normalize([
+          p.descripcion || '',
+          (p.etiquetas || []).join(' '),
+          (p.actualizaciones || []).map((a) => a.texto || '').join(' ')
+        ].join(' '));
+        if (blob.indexOf(nq) < 0) return false;
       }
       return true;
     });
@@ -2225,7 +2331,7 @@ function renderPendientesOperativos(root, lista) {
     const tb = el('tbody');
     filt.forEach((p) => {
       const eq = eqMap[p.equipoKey];
-      const vencido = p.fechaCompromiso && p.estado === 'abierto' && new Date(p.fechaCompromiso) < new Date(todayISO());
+      const vencido = p.fechaCompromiso && p.estado !== 'cerrado' && new Date(p.fechaCompromiso) < new Date(todayISO());
       const tr = el('tr', { class: 'row-link' });
       tr.innerHTML = '<td>' + estadoPendDot(p) + '</td>' +
         '<td>' + escapeHtml(p.descripcion) + '</td>' +
@@ -2233,7 +2339,7 @@ function renderPendientesOperativos(root, lista) {
         '<td>' + escapeHtml(p.ejecutor || '—') + '</td>' +
         '<td>' + (p.fechaCompromiso ? fmtFecha(p.fechaCompromiso) + (vencido ? ' <span class="badge badge-danger">vencido</span>' : '') : '—') + '</td>' +
         '<td><span class="badge ' + (p.prioridad === 'alta' ? 'badge-danger' : p.prioridad === 'media' ? 'badge-warning' : 'badge-neutral') + '">' + escapeHtml(p.prioridad || 'media') + '</span></td>' +
-        '<td>' + escapeHtml(p.estado) + '</td>';
+        '<td><span class="badge ' + estadoPendBadgeCls(p.estado) + '">' + escapeHtml(estadoPendLabel(p.estado)) + '</span></td>';
       tr.addEventListener('click', () => abrirModalPendiente(p));
       tb.appendChild(tr);
     });
@@ -2242,15 +2348,88 @@ function renderPendientesOperativos(root, lista) {
 }
 
 function estadoPendDot(p) {
-  // Indicador de sincronización: si está en cola, naranja
   const enCola = MP.queue.some((q) => q.payload && q.payload.pendiente && q.payload.pendiente.id === p.id);
   if (enCola) return '<span class="dot dot-orange" title="Sincronizando"></span>';
   if (p.estado === 'cerrado') return '<span class="dot dot-green" title="Cerrado"></span>';
+  if (p.estado === 'en_progreso') return '<span class="dot" style="background:var(--c-warning)" title="En progreso"></span>';
   return '<span class="dot dot-blue" title="Abierto"></span>';
 }
 
+function estadoPendLabel(estado) {
+  return ({ abierto: 'Abierto', en_progreso: 'En progreso', cerrado: 'Cerrado' })[estado] || estado;
+}
+
+function estadoPendBadgeCls(estado) {
+  return ({ abierto: 'badge-info', en_progreso: 'badge-warning', cerrado: 'badge-success' })[estado] || 'badge-neutral';
+}
+
+/* Acciones rápidas sobre un pendiente — usadas desde la card y la lista Mi día */
+function cambiarEstadoPendiente(p, nuevoEstado) {
+  const prev = p.estado;
+  p.estado = nuevoEstado;
+  const idx = MP.pendientes.data.findIndex((x) => x.id === p.id);
+  if (idx >= 0) MP.pendientes.data[idx] = p;
+  saveCache(LS.cachePend, MP.pendientes);
+  Queue.add('savePendiente', { pendiente: p });
+  Toast.success('Estado: ' + estadoPendLabel(nuevoEstado), { action: 'Deshacer', duration: 6000,
+    onAction: () => { p.estado = prev; saveCache(LS.cachePend, MP.pendientes); Queue.add('savePendiente', { pendiente: p }); if (currentView) renderView(currentView); } });
+  updateSyncIndicator();
+  if (currentView) renderView(currentView);
+}
+
+function posponerPendiente(p, dias) {
+  const prev = p.fechaCompromiso;
+  const base = p.fechaCompromiso ? new Date(p.fechaCompromiso) : new Date();
+  base.setDate(base.getDate() + dias);
+  p.fechaCompromiso = base.toISOString().slice(0, 10);
+  // Si no existía actualizaciones, crearlo. Anotar el aplazamiento.
+  p.actualizaciones = p.actualizaciones || [];
+  p.actualizaciones.push({ id: uid(), fecha: new Date().toISOString(), texto: 'Pospuesto ' + dias + 'd · nueva fecha: ' + fmtFecha(p.fechaCompromiso), usuario: '' });
+  const idx = MP.pendientes.data.findIndex((x) => x.id === p.id);
+  if (idx >= 0) MP.pendientes.data[idx] = p;
+  saveCache(LS.cachePend, MP.pendientes);
+  Queue.add('savePendiente', { pendiente: p });
+  Toast.success('Pospuesto a ' + fmtFecha(p.fechaCompromiso), { action: 'Deshacer', duration: 6000,
+    onAction: () => { p.fechaCompromiso = prev; p.actualizaciones.pop(); saveCache(LS.cachePend, MP.pendientes); Queue.add('savePendiente', { pendiente: p }); if (currentView) renderView(currentView); } });
+  if (currentView) renderView(currentView);
+}
+
+function reasignarPendienteMenu(p, anchorBtn) {
+  // Mini dropdown junto al botón
+  document.querySelectorAll('.qa-menu').forEach((m) => m.remove());
+  const menu = el('div', { class: 'qa-menu', style: 'position:absolute;background:var(--c-bg-elev);border:1px solid var(--c-border);border-radius:var(--rd-md);box-shadow:var(--sh-lg);padding:4px;z-index:300;min-width:200px;max-height:280px;overflow-y:auto' });
+  ['(sin asignar)'].concat(EJECUTORES_DEFAULT).forEach((ej) => {
+    const realName = ej === '(sin asignar)' ? '' : ej;
+    const it = el('div', { style: 'padding:6px 10px;cursor:pointer;border-radius:var(--rd-sm);font-size:var(--fs-sm)' });
+    it.textContent = ej;
+    it.addEventListener('mouseenter', () => it.style.background = 'var(--c-bg-soft)');
+    it.addEventListener('mouseleave', () => it.style.background = '');
+    it.addEventListener('click', () => {
+      menu.remove();
+      const prev = p.ejecutor;
+      p.ejecutor = realName;
+      const idx = MP.pendientes.data.findIndex((x) => x.id === p.id);
+      if (idx >= 0) MP.pendientes.data[idx] = p;
+      saveCache(LS.cachePend, MP.pendientes);
+      Queue.add('savePendiente', { pendiente: p });
+      Toast.success('Reasignado a ' + (realName || 'sin asignar'), { action: 'Deshacer', duration: 6000,
+        onAction: () => { p.ejecutor = prev; saveCache(LS.cachePend, MP.pendientes); Queue.add('savePendiente', { pendiente: p }); if (currentView) renderView(currentView); } });
+      if (currentView) renderView(currentView);
+    });
+    menu.appendChild(it);
+  });
+  const rect = anchorBtn.getBoundingClientRect();
+  menu.style.top = (rect.bottom + window.scrollY + 4) + 'px';
+  menu.style.left = (Math.min(rect.left + window.scrollX, window.innerWidth - 220)) + 'px';
+  document.body.appendChild(menu);
+  setTimeout(() => {
+    const closeOnOut = (e) => { if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('mousedown', closeOnOut, true); } };
+    document.addEventListener('mousedown', closeOnOut, true);
+  }, 50);
+}
+
 function pendienteCard(p, eq) {
-  const vencido = p.fechaCompromiso && p.estado === 'abierto' && new Date(p.fechaCompromiso) < new Date(todayISO());
+  const vencido = p.fechaCompromiso && p.estado !== 'cerrado' && new Date(p.fechaCompromiso) < new Date(todayISO());
   const diasV = vencido ? -daysBetween(p.fechaCompromiso, todayISO()) : 0;
   const c = el('div', { class: 'card card-interactive' });
   c.innerHTML = '<div class="row-between mb-2">' +
@@ -2259,9 +2438,30 @@ function pendienteCard(p, eq) {
     '</div>' +
     '<div class="tiny muted">' + (eq ? icon('equipment',12) + ' ' + escapeHtml(eq.equipo + ' · ' + eq.inventario) : '<em>Pendiente suelto</em>') + '</div>' +
     '<div class="tiny mt-2">' + icon('user',12) + ' ' + escapeHtml(p.ejecutor || '—') + (p.fechaCompromiso ? ' · ' + icon('calendar',12) + ' ' + fmtFecha(p.fechaCompromiso) : '') +
-    (vencido ? ' <span class="badge badge-danger">' + diasV + 'd vencido</span>' : '') + '</div>' +
+    (vencido ? ' <span class="badge badge-danger">' + diasV + 'd vencido</span>' : '') +
+    (p.estado === 'en_progreso' ? ' <span class="badge badge-warning">en progreso</span>' : '') + '</div>' +
     ((p.etiquetas && p.etiquetas.length) ? '<div class="row mt-2">' + p.etiquetas.map((t) => '<span class="tag">' + escapeHtml(t) + '</span>').join('') + '</div>' : '') +
     ((p.actualizaciones && p.actualizaciones.length) ? '<div class="tiny muted mt-2">' + icon('file-text',12) + ' ' + p.actualizaciones.length + ' actualización' + (p.actualizaciones.length === 1 ? '' : 'es') + '</div>' : '');
+
+  // Quick actions row (no abre modal)
+  const qa = el('div', { class: 'row mt-3', style: 'gap:4px;border-top:1px solid var(--c-border);padding-top:8px' });
+  const noProp = (fn) => (e) => { e.stopPropagation(); fn(); };
+  if (p.estado !== 'cerrado') {
+    qa.appendChild(el('button', { class: 'btn btn-sm btn-success tooltip', dataset: { tip: 'Marcar cerrado' }, html: icon('check',12), onclick: noProp(() => cambiarEstadoPendiente(p, 'cerrado')) }));
+    if (p.estado !== 'en_progreso') {
+      qa.appendChild(el('button', { class: 'btn btn-sm btn-secondary tooltip', dataset: { tip: 'Marcar en progreso' }, html: icon('play',12), onclick: noProp(() => cambiarEstadoPendiente(p, 'en_progreso')) }));
+    } else {
+      qa.appendChild(el('button', { class: 'btn btn-sm btn-secondary tooltip', dataset: { tip: 'Pausar (volver a abierto)' }, html: icon('pause',12), onclick: noProp(() => cambiarEstadoPendiente(p, 'abierto')) }));
+    }
+    qa.appendChild(el('button', { class: 'btn btn-sm btn-ghost tooltip', dataset: { tip: 'Posponer 1 día' }, html: '+1d', onclick: noProp(() => posponerPendiente(p, 1)) }));
+    qa.appendChild(el('button', { class: 'btn btn-sm btn-ghost tooltip', dataset: { tip: 'Posponer 1 semana' }, html: '+7d', onclick: noProp(() => posponerPendiente(p, 7)) }));
+    const reasignBtn = el('button', { class: 'btn btn-sm btn-ghost tooltip', dataset: { tip: 'Reasignar' }, html: icon('user',12) });
+    reasignBtn.addEventListener('click', (e) => { e.stopPropagation(); reasignarPendienteMenu(p, reasignBtn); });
+    qa.appendChild(reasignBtn);
+  } else {
+    qa.appendChild(el('button', { class: 'btn btn-sm btn-secondary tooltip', dataset: { tip: 'Reabrir' }, html: icon('refresh',12) + ' Reabrir', onclick: noProp(() => cambiarEstadoPendiente(p, 'abierto')) }));
+  }
+  c.appendChild(qa);
   c.addEventListener('click', () => abrirModalPendiente(p));
   return c;
 }
