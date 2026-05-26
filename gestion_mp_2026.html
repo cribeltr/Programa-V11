@@ -2378,7 +2378,8 @@ function renderPlantilla(root) {
     Toast.show('Generando…');
     try { const r = await api('generarPlantillaMensual', { mes }); if (r.ok) Toast.success('Hoja creada: ' + r.data.hoja); else Toast.danger('Error: ' + r.error); } catch (e) { Toast.danger('Sin conexión'); }
   } }));
-  row.appendChild(el('button', { class: 'btn btn-secondary', html: icon('download',14) + ' Excel', onclick: () => exportarPlantillaExcel(mes) }));
+  row.appendChild(el('button', { class: 'btn btn-secondary', html: icon('download',14) + ' Descargar Excel', onclick: () => exportarPlantillaExcel(mes) }));
+  row.appendChild(el('button', { class: 'btn btn-secondary', html: icon('upload',14) + ' Subir plantilla completada', onclick: () => subirPlantillaCompleta(mes) }));
   row.appendChild(el('button', { class: 'btn btn-secondary', html: icon('file-pdf',14) + ' PDF', onclick: () => exportarPdfMes(mes, equiposDelMes(mes)) }));
   card.appendChild(row);
 
@@ -3503,6 +3504,16 @@ async function loadXLSX() {
     document.head.appendChild(s);
   });
 }
+async function loadExcelJS() {
+  if (window.ExcelJS) return window.ExcelJS;
+  return new Promise((resolve) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js';
+    s.onload = () => resolve(window.ExcelJS);
+    s.onerror = () => { Toast.danger('No se pudo cargar ExcelJS'); resolve(null); };
+    document.head.appendChild(s);
+  });
+}
 async function exportTablaExcel(nombre, equipos, mes) {
   const X = await loadXLSX(); if (!X) return;
   const asign = MP.asignaciones.data || {};
@@ -3528,7 +3539,271 @@ async function exportarPendientesExcel(arr) {
   X.writeFile(wb, 'pendientes.xlsx');
 }
 async function exportarPlantillaExcel(mes) {
-  return exportTablaExcel('Plantilla_' + mes, equiposDelMes(mes), mes);
+  Toast.show('Generando plantilla Excel…');
+  const ExcelJS = await loadExcelJS();
+  if (!ExcelJS) return;
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'Gestión MP 2026 · HHHA';
+  wb.created = new Date();
+  const mesNombre = MESES_LARGO[mes - 1];
+  const ws = wb.addWorksheet('Plantilla_' + MESES[mes - 1], { views: [{ state: 'frozen', ySplit: 1 }] });
+
+  ws.columns = [
+    { header: 'ID Equipo',       key: 'id',       width: 12 },
+    { header: 'N° Inventario',   key: 'inv',      width: 14 },
+    { header: 'N° Carpeta',      key: 'carpeta',  width: 12 },
+    { header: 'Equipo',          key: 'equipo',   width: 32 },
+    { header: 'Servicio',        key: 'servicio', width: 18 },
+    { header: 'Ubicación',       key: 'ubic',     width: 18 },
+    { header: 'Marca',           key: 'marca',    width: 14 },
+    { header: 'Modelo',          key: 'modelo',   width: 14 },
+    { header: 'Serie',           key: 'serie',    width: 14 },
+    { header: 'Cód programado',  key: 'cod',      width: 12 },
+    { header: 'Responsable',     key: 'resp',     width: 28 },
+    { header: 'Fecha ejecución', key: 'fecha',    width: 14, style: { numFmt: 'dd-mm-yyyy' } },
+    { header: 'Resultado',       key: 'resultado', width: 12 },
+    { header: 'Observaciones',   key: 'obs',      width: 36 }
+  ];
+
+  // Estilo encabezado
+  const head = ws.getRow(1);
+  head.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
+  head.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F3A64' } };
+  head.alignment = { vertical: 'middle', horizontal: 'center' };
+  head.height = 22;
+  head.eachCell((cell) => {
+    cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' }, bottom: { style: 'thin' } };
+  });
+
+  // Datos
+  const asign = MP.asignaciones.data || {};
+  const equipos = equiposDelMes(mes);
+  equipos.forEach((eq) => {
+    ws.addRow({
+      id: eq.id, inv: eq.inventario, carpeta: eq.carpeta,
+      equipo: eq.equipo, servicio: eq.servicio, ubic: eq.ubicacion,
+      marca: eq.marca, modelo: eq.modelo, serie: eq.serie,
+      cod: eq.mesesP[mes - 1],
+      resp: (asign[eq.key] || {})[mes - 1] || '',
+      fecha: null, resultado: '', obs: ''
+    });
+  });
+
+  // Hoja de listas (oculta) para dropdowns
+  const wsList = wb.addWorksheet('_Listas', { state: 'hidden' });
+  EJECUTORES_DEFAULT.forEach((e, i) => wsList.getCell('A' + (i + 1)).value = e);
+  CODIGOS_REG.forEach((c, i) => wsList.getCell('B' + (i + 1)).value = c);
+
+  // Data validations: K = Responsable (col 11), L = Fecha (col 12), M = Resultado (col 13)
+  const lastRow = ws.rowCount;
+  const dvEjec = {
+    type: 'list', allowBlank: true,
+    formulae: ['_Listas!$A$1:$A$' + EJECUTORES_DEFAULT.length],
+    showErrorMessage: true,
+    errorTitle: 'Ejecutor inválido',
+    error: 'Selecciona un ejecutor de la lista (botón desplegable a la derecha de la celda).'
+  };
+  const dvRes = {
+    type: 'list', allowBlank: true,
+    formulae: ['_Listas!$B$1:$B$' + CODIGOS_REG.length],
+    showErrorMessage: true,
+    errorTitle: 'Resultado inválido',
+    error: 'Usa Si, Si-RA, C1..C8, FS, Baja o NU.'
+  };
+  for (let r = 2; r <= lastRow; r++) {
+    ws.getCell('K' + r).dataValidation = dvEjec;
+    ws.getCell('M' + r).dataValidation = dvRes;
+    // Formato de fecha
+    ws.getCell('L' + r).numFmt = 'dd-mm-yyyy';
+    // Bordes ligeros
+    ['A','B','C','D','E','F','G','H','I','J','K','L','M','N'].forEach((col) => {
+      ws.getCell(col + r).border = { top: { style: 'hair', color: { argb: 'FFCCCCCC' } }, bottom: { style: 'hair', color: { argb: 'FFCCCCCC' } } };
+    });
+  }
+  // Sombrear columnas a completar (resp, fecha, resultado, obs)
+  if (lastRow >= 2) {
+    ['K','L','M','N'].forEach((col) => {
+      for (let r = 2; r <= lastRow; r++) {
+        ws.getCell(col + r).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF8E1' } };
+      }
+    });
+  }
+
+  // Autofilter
+  ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 14 } };
+
+  // Hoja con instrucciones
+  const wsInfo = wb.addWorksheet('Instrucciones', { state: 'visible' });
+  wsInfo.getCell('A1').value = 'Plantilla MP 2026 — ' + mesNombre;
+  wsInfo.getCell('A1').font = { bold: true, size: 14, color: { argb: 'FF1F3A64' } };
+  const inst = [
+    '',
+    '1. La columna "Responsable" tiene lista desplegable (click en la flecha que aparece al seleccionar la celda).',
+    '2. La columna "Resultado" también tiene lista desplegable: Si, Si-RA, C1..C8, FS, Baja, NU.',
+    '3. "Fecha ejecución" usa formato dd-mm-yyyy.',
+    '4. Cuando termines, súbela en la app: vista Plantilla → "Subir plantilla completada".',
+    '5. No cambies los encabezados ni el ID Equipo (la app usa el ID para identificar cada fila).',
+    '6. Filas con celdas amarillas son las que debes completar.',
+    '',
+    'Equipos en este mes: ' + equipos.length
+  ];
+  inst.forEach((t, i) => { wsInfo.getCell('A' + (i + 2)).value = t; });
+  wsInfo.getColumn('A').width = 100;
+
+  // Generar y descargar
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'Plantilla_MP_' + MESES[mes - 1] + '_' + new Date().getFullYear() + '.xlsx';
+  a.click();
+  Toast.success('Plantilla descargada (' + equipos.length + ' equipos · ' + Math.round(blob.size / 1024) + ' KB)');
+}
+
+/* ===== Subir plantilla completada ===== */
+async function subirPlantillaCompleta(mesEsperado) {
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = '.xlsx,.xls';
+  inp.onchange = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    Toast.show('Leyendo plantilla…');
+    const X = await loadXLSX(); if (!X) return;
+    let wb;
+    try {
+      const buf = await file.arrayBuffer();
+      wb = X.read(buf, { type: 'array', cellDates: true });
+    } catch (err) { Toast.danger('No se pudo leer el archivo: ' + err.message); return; }
+    const sheetName = wb.SheetNames.find((n) => /^plantilla/i.test(n)) || wb.SheetNames[0];
+    if (!sheetName) { Toast.danger('La planilla no tiene hojas'); return; }
+    const ws = wb.Sheets[sheetName];
+    const rows = X.utils.sheet_to_json(ws, { defval: '', raw: false });
+    if (!rows.length) { Toast.danger('La hoja está vacía'); return; }
+    revisarPlantillaCargada(mesEsperado, rows, file.name);
+  };
+  inp.click();
+}
+
+function revisarPlantillaCargada(mes, rows, fileName) {
+  // Mapear filas a equipos por ID
+  const byId = {};
+  (MP.equipos.data || []).forEach((eq) => { byId[eq.id] = eq; });
+  const cambios = [];
+  const errores = [];
+  rows.forEach((row, i) => {
+    const id = String(row['ID Equipo'] || row['ID'] || row['id'] || '').trim();
+    if (!id) return;
+    const eq = byId[id];
+    if (!eq) { errores.push('Fila ' + (i + 2) + ': ID "' + id + '" no existe en el catastro'); return; }
+    const resp = String(row['Responsable'] || row['resp'] || '').trim();
+    const resultado = String(row['Resultado'] || row['resultado'] || '').trim();
+    const fechaRaw = row['Fecha ejecución'] || row['Fecha'] || row['fecha'] || '';
+    const obs = String(row['Observaciones'] || row['obs'] || '').trim();
+    let fecha = '';
+    if (fechaRaw) {
+      if (fechaRaw instanceof Date && !isNaN(fechaRaw)) fecha = fechaRaw.toISOString().slice(0, 10);
+      else {
+        const s = String(fechaRaw).trim();
+        // Aceptar dd-mm-yyyy o yyyy-mm-dd
+        const m1 = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+        const m2 = s.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/);
+        if (m1) fecha = m1[3] + '-' + m1[2].padStart(2,'0') + '-' + m1[1].padStart(2,'0');
+        else if (m2) fecha = m2[1] + '-' + m2[2].padStart(2,'0') + '-' + m2[3].padStart(2,'0');
+      }
+    }
+    if (resp && EJECUTORES_DEFAULT.indexOf(resp) < 0) {
+      errores.push('Fila ' + (i + 2) + ' (' + eq.equipo + '): Responsable "' + resp + '" no está en la lista oficial');
+    }
+    if (resultado && CODIGOS_REG.indexOf(resultado) < 0) {
+      errores.push('Fila ' + (i + 2) + ' (' + eq.equipo + '): Resultado "' + resultado + '" inválido');
+    }
+    if (!resp && !resultado && !fecha && !obs) return; // fila no completada
+    cambios.push({ equipoKey: eq.key, equipo: eq, responsable: resp, resultado, fecha, observacion: obs });
+  });
+
+  const root = el('div');
+  root.innerHTML = '<div class="modal-header"><h3 class="modal-title">Revisar plantilla cargada · ' + MESES_LARGO[mes - 1] + '</h3><button class="btn btn-icon btn-ghost" data-close>' + icon('x') + '</button></div>';
+  const body = el('div', { class: 'modal-body' });
+  body.appendChild(el('div', { class: 'card mb-3' }, [
+    el('div', { class: 'tiny' }, [el('strong', { text: fileName })]),
+    el('div', { class: 'tiny muted', text: rows.length + ' filas leídas · ' + cambios.length + ' con cambios · ' + errores.length + ' con error' })
+  ]));
+  if (errores.length) {
+    const ec = el('div', { class: 'card mb-3', style: 'background:#fee2e2;border-color:#dc2626' });
+    ec.innerHTML = '<h3>Errores (' + errores.length + ')</h3>';
+    const ul = el('ul', { class: 'tiny' });
+    errores.slice(0, 30).forEach((e) => ul.appendChild(el('li', { text: e })));
+    if (errores.length > 30) ul.appendChild(el('li', { text: '… y ' + (errores.length - 30) + ' más' }));
+    ec.appendChild(ul);
+    body.appendChild(ec);
+  }
+  if (cambios.length) {
+    body.appendChild(el('h3', { text: 'Cambios a aplicar (' + cambios.length + ')' }));
+    const tw = el('div', { class: 'table-wrap', style: 'max-height:350px;overflow:auto' });
+    const t = el('table', { class: 'table table-dense' });
+    t.innerHTML = '<thead><tr><th>Equipo</th><th>Inv</th><th>Responsable</th><th>Fecha</th><th>Resultado</th><th>Obs</th><th>Acciones</th></tr></thead>';
+    const tb = el('tbody');
+    cambios.forEach((c, idx) => {
+      const tr = el('tr');
+      tr.innerHTML = '<td>' + escapeHtml(c.equipo.equipo) + '</td><td>' + escapeHtml(c.equipo.inventario) + '</td>' +
+        '<td>' + (c.responsable ? '<strong>' + escapeHtml(c.responsable) + '</strong>' : '<span class="muted">—</span>') + '</td>' +
+        '<td>' + (c.fecha ? fmtFecha(c.fecha) : '<span class="muted">—</span>') + '</td>' +
+        '<td>' + (c.resultado ? codigoBadge(c.resultado) : '<span class="muted">—</span>') + '</td>' +
+        '<td class="tiny muted">' + escapeHtml(c.observacion).slice(0, 40) + '</td>' +
+        '<td><label class="tiny"><input type="checkbox" data-idx="' + idx + '" checked> aplicar</label></td>';
+      tb.appendChild(tr);
+    });
+    t.appendChild(tb); tw.appendChild(t); body.appendChild(tw);
+  } else if (!errores.length) {
+    body.appendChild(emptyState('Sin cambios', 'Ninguna fila tiene Responsable, Fecha, Resultado u Observación completados.', 'info'));
+  }
+  root.appendChild(body);
+  const ft = el('div', { class: 'modal-footer' });
+  ft.appendChild(el('button', { class: 'btn btn-ghost', text: 'Cancelar', dataset: { close: '1' } }));
+  if (cambios.length) {
+    ft.appendChild(el('button', { class: 'btn btn-primary', html: icon('check',14) + ' Aplicar cambios', onclick: async () => {
+      // Filtrar por checkboxes marcados
+      const aplicar = [];
+      body.querySelectorAll('[data-idx]').forEach((cb) => { if (cb.checked) aplicar.push(cambios[Number(cb.dataset.idx)]); });
+      let asignaciones = 0, overrides = 0, eventos = 0;
+      aplicar.forEach((c) => {
+        if (c.responsable) {
+          Queue.add('saveAsignacion', { equipoKey: c.equipoKey, mes, ejecutor: c.responsable });
+          if (!MP.asignaciones.data[c.equipoKey]) MP.asignaciones.data[c.equipoKey] = {};
+          MP.asignaciones.data[c.equipoKey][mes - 1] = c.responsable;
+          asignaciones++;
+        }
+        if (c.resultado) {
+          Queue.add('saveResultadoOverride', { equipoKey: c.equipoKey, mes, resultado: c.resultado });
+          if (!MP.overrides.data[c.equipoKey]) MP.overrides.data[c.equipoKey] = {};
+          MP.overrides.data[c.equipoKey][mes - 1] = c.resultado;
+          overrides++;
+        }
+        if (c.fecha || c.observacion) {
+          // Crear evento MP con la info
+          const ev = {
+            id: uid(), equipoKey: c.equipoKey, tipo: 'mp',
+            fecha: c.fecha || todayISO(),
+            resultado: c.resultado || '',
+            ejecutor: c.responsable || '',
+            observacion: c.observacion || '',
+            createdAt: new Date().toISOString()
+          };
+          MP.eventos.data.push(ev);
+          Queue.add('saveEvento', { evento: ev });
+          eventos++;
+        }
+      });
+      saveCache(LS.cacheAsign, MP.asignaciones);
+      saveCache(LS.cacheOver, MP.overrides);
+      saveCache(LS.cacheEv, MP.eventos);
+      calcularKPIsLocal();
+      Toast.success('Aplicado: ' + asignaciones + ' asignaciones · ' + overrides + ' resultados · ' + eventos + ' eventos');
+      document.querySelectorAll('.modal-backdrop').forEach((b) => b.remove());
+      renderView(currentView);
+    } }));
+  }
+  root.appendChild(ft);
+  openModal(root, { size: 'lg' });
 }
 async function exportListaExcel(tipo, filas) {
   const X = await loadXLSX(); if (!X) return;
