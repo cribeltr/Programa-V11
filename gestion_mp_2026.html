@@ -1538,6 +1538,10 @@ function renderHeader() {
   const sp = el('span', { id: 'syncPill', class: 'sync-pill', tooltip: 'Sincronización' });
   sp.addEventListener('click', () => abrirModalCola());
   h.appendChild(sp);
+  // nuevo pendiente
+  const newPend = el('button', { class: 'btn btn-primary btn-sm tooltip', dataset: { tip: 'Nuevo pendiente (atajo: n)' }, html: icon('plus',14) + ' Pendiente' });
+  newPend.addEventListener('click', () => abrirModalPendiente(null));
+  h.appendChild(newPend);
   // recorder
   const rec = el('button', { id: 'recBtn', class: 'btn btn-icon btn-ghost tooltip', dataset: { tip: 'Grabar sesión (clicks, navegación, errores)' }, html: icon('circle',16) });
   rec.addEventListener('click', () => Recorder.toggle());
@@ -3097,6 +3101,19 @@ function abrirModalPendiente(p) {
   } }));
   root.appendChild(ft);
   openModal(root);
+  // Foco automatico para tipear directo
+  setTimeout(() => {
+    if (isNew && !p.equipoKey) {
+      // Foco en el autocomplete de equipo (input cuyo placeholder menciona "Pendiente suelto")
+      const ins = document.querySelectorAll('.modal-backdrop input');
+      for (let i = 0; i < ins.length; i++) {
+        if (/pendiente suelto/i.test(ins[i].placeholder || '')) { ins[i].focus(); break; }
+      }
+    } else if (isNew) {
+      const ta = document.querySelector('.modal-backdrop textarea[data-key="descripcion"]');
+      if (ta) ta.focus();
+    }
+  }, 60);
 }
 
 /* Autocomplete de equipo: escribe inventario / serie / nombre y elige */
@@ -3734,6 +3751,7 @@ function bindAtajos() {
   document.addEventListener('keydown', (e) => {
     if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT')) return;
     if (e.key === '/') { e.preventDefault(); const s = $('#globalSearch'); if (s) s.focus(); }
+    if (e.key === 'n' || e.key === 'N') { e.preventDefault(); abrirModalPendiente(null); return; }
     if (e.key === 'Escape') { document.querySelectorAll('.modal-backdrop').forEach((b) => b.remove()); }
     if (e.key === 'g') {
       const handler = (e2) => {
