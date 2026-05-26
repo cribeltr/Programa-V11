@@ -1276,6 +1276,24 @@ async function api(action, payload, opts) {
 const Queue = {
   add(action, payload, opts) {
     opts = opts || {};
+    // Dedup: si una operación idempotente ya está pendiente para el mismo target, sobreescribe el payload
+    const dedupKey = this._dedupKey(action, payload);
+    if (dedupKey) {
+      for (let i = 0; i < MP.queue.length; i++) {
+        const q = MP.queue[i];
+        if (q.estado !== 'en_curso' && this._dedupKey(q.action, q.payload) === dedupKey) {
+          q.payload = payload;
+          q.creadoEn = Date.now();
+          q.intentos = 0;
+          q.ultimoError = '';
+          q.estado = 'pendiente';
+          lsSet(LS.queue, MP.queue);
+          updateSyncIndicator();
+          this.process();
+          return q.id;
+        }
+      }
+    }
     const item = {
       id: 'q_' + uid(),
       localId: opts.localId || null,
@@ -1284,13 +1302,21 @@ const Queue = {
       creadoEn: Date.now(),
       ultimoIntento: 0,
       ultimoError: '',
-      estado: 'pendiente' // pendiente | en_curso | conflicto | descartado
+      estado: 'pendiente'
     };
     MP.queue.push(item);
     lsSet(LS.queue, MP.queue);
     updateSyncIndicator();
-    this.process(); // intenta inmediato
+    this.process();
     return item.id;
+  },
+  _dedupKey(action, payload) {
+    // Operaciones que sobreescriben el mismo target: dedup
+    if (action === 'saveAsignacion') return action + ':' + payload.equipoKey + ':' + payload.mes;
+    if (action === 'saveResultadoOverride' || action === 'deleteResultadoOverride') return 'override:' + payload.equipoKey + ':' + payload.mes;
+    if (action === 'savePendiente' && payload.pendiente && payload.pendiente.id) return action + ':' + payload.pendiente.id;
+    if (action === 'saveEvento' && payload.evento && payload.evento.id) return action + ':' + payload.evento.id;
+    return null; // sin dedup
   },
   remove(id) {
     MP.queue = MP.queue.filter((q) => q.id !== id);
@@ -1392,22 +1418,19 @@ async function recargarTodo(opts) {
   opts = opts || {};
   if (!MP.config.WEB_APP_URL || !MP.config.API_TOKEN) return;
   try {
-    const [eq, pe, ev, re, ov, asn, ic] = await Promise.all([
-      api('getEquipos', { nocache: opts.force }),
-      api('getPendientes', {}),
-      api('getEventos', {}),
-      api('getReprogs', {}),
-      api('getOverrides', {}),
-      api('getAsignaciones', {}),
-      api('getInconsistencias', {})
-    ]);
-    if (eq.ok) { MP.equipos = { ts: Date.now(), data: eq.data }; saveCache(LS.cacheEq, MP.equipos); }
-    if (pe.ok) { MP.pendientes = { ts: Date.now(), data: pe.data }; saveCache(LS.cachePend, MP.pendientes); }
-    if (ev.ok) { MP.eventos = { ts: Date.now(), data: ev.data }; saveCache(LS.cacheEv, MP.eventos); }
-    if (re.ok) { MP.reprogs = { ts: Date.now(), data: re.data }; saveCache(LS.cacheReprog, MP.reprogs); }
-    if (ov.ok) { MP.overrides = { ts: Date.now(), data: ov.data }; saveCache(LS.cacheOver, MP.overrides); }
-    if (asn.ok) { MP.asignaciones = { ts: Date.now(), data: asn.data }; saveCache(LS.cacheAsign, MP.asignaciones); }
-    if (ic.ok) { MP.inconsistencias = { ts: Date.now(), data: ic.data }; saveCache(LS.cacheInc, MP.inconsistencias); }
+    // Batch: 1 request en vez de 7
+    const r = await api('getDashboardData', { nocache: opts.force });
+    if (!r.ok) throw new Error(r.error || 'dashboard_error');
+    const d = r.data;
+    const ts = Date.now();
+    MP.equipos = { ts, data: d.equipos || [] }; saveCache(LS.cacheEq, MP.equipos);
+    MP.pendientes = { ts, data: d.pendientes || [] }; saveCache(LS.cachePend, MP.pendientes);
+    MP.eventos = { ts, data: d.eventos || [] }; saveCache(LS.cacheEv, MP.eventos);
+    MP.reprogs = { ts, data: d.reprogs || [] }; saveCache(LS.cacheReprog, MP.reprogs);
+    MP.overrides = { ts, data: d.overrides || {} }; saveCache(LS.cacheOver, MP.overrides);
+    MP.asignaciones = { ts, data: d.asignaciones || {} }; saveCache(LS.cacheAsign, MP.asignaciones);
+    MP.inconsistencias = { ts, data: d.inconsistencias || [] }; saveCache(LS.cacheInc, MP.inconsistencias);
+    MP.ultimoSyncOk = Date.now();
     calcularKPIsLocal();
     updateSyncIndicator();
     if (currentView) renderView(currentView);
@@ -1640,8 +1663,22 @@ function renderInicio(root) {
   const incSinRevisar = (MP.inconsistencias.data || []).filter((i) => i.estado === 'nueva').length;
 
   root.innerHTML = '';
+  // Empty state: primera vez sin datos
+  if (!(MP.equipos.data || []).length) {
+    root.appendChild(el('div', { class: 'empty-state' }, [
+      el('div', { class: 'es-icon', html: icon('upload', 48) }),
+      el('h3', { text: 'Comienza cargando tu maestro' }),
+      el('p', { text: 'No hay equipos todavía. Ve a Configuración → "Cargar maestro (Excel)" para subir tu archivo .xlsm o .xlsx.' }),
+      el('button', { class: 'btn btn-primary mt-3', html: icon('upload',14) + ' Ir a Configuración', onclick: () => navigate('config') })
+    ]));
+    return;
+  }
+  const lastSync = MP.ultimoSyncOk ? Math.round((Date.now() - MP.ultimoSyncOk) / 60000) : null;
   root.appendChild(el('div', { class: 'row-between mb-4' }, [
-    el('h1', { text: 'Inicio · MP 2026' }),
+    el('div', {}, [
+      el('h1', { text: 'Inicio · MP 2026', style: 'margin:0' }),
+      lastSync != null ? el('div', { class: 'tiny muted', text: 'Última sincronización: ' + (lastSync === 0 ? 'ahora' : 'hace ' + lastSync + ' min') }) : null
+    ]),
     el('div', { class: 'row' }, [
       botonRefrescar(),
       botonSnapshot(),
@@ -2061,7 +2098,16 @@ function renderBuscar(root) {
 
   const list = el('div', { class: 'stack' });
   equipos.slice(0, 200).forEach((eq) => list.appendChild(equipoCard(eq, q)));
-  if (!equipos.length) list.appendChild(emptyState('Sin resultados', 'Ajusta los filtros o limpia la búsqueda.', 'search'));
+  if (!(MP.equipos.data || []).length) {
+    list.appendChild(el('div', { class: 'empty-state' }, [
+      el('div', { class: 'es-icon', html: icon('upload', 48) }),
+      el('h3', { text: 'No hay equipos cargados' }),
+      el('p', { text: 'Sube tu archivo maestro desde Configuración.' }),
+      el('button', { class: 'btn btn-primary mt-3', html: icon('upload',14) + ' Ir a Configuración', onclick: () => navigate('config') })
+    ]));
+  } else if (!equipos.length) {
+    list.appendChild(emptyState('Sin resultados', 'Ajusta los filtros o limpia la búsqueda.', 'search'));
+  }
   if (equipos.length > 200) list.appendChild(el('div', { class: 'tiny muted center mt-2', text: 'Mostrando 200 de ' + equipos.length + '. Refina los filtros.' }));
   root.appendChild(list);
 }
@@ -2318,11 +2364,28 @@ function renderPendientesOperativos(root, lista) {
     });
   }
   const filt = filter(lista);
-  if (!filt.length) { root.appendChild(emptyState('Sin pendientes', 'No hay pendientes con esos filtros.', 'check-circle')); return; }
+  root.appendChild(renderBarraSeleccion());
+  actualizarBarraSeleccion();
+  if (!filt.length) {
+    root.appendChild(emptyState(
+      txtBusq || filtros.responsable || filtros.prioridad || filtroVista ? 'Sin coincidencias' : 'Sin pendientes',
+      txtBusq || filtros.responsable || filtros.prioridad || filtroVista
+        ? 'Prueba a limpiar los filtros (botón abajo).'
+        : 'Crea el primer pendiente con el botón "+ Pendiente" arriba o la tecla "n".',
+      'check-circle'));
+    if (txtBusq || filtros.responsable || filtros.prioridad || filtroVista) {
+      const btn = el('button', { class: 'btn btn-secondary', text: 'Limpiar filtros', onclick: () => {
+        MP.uiState.pendBusqueda = ''; MP.uiState.pendFiltros = { estado: 'activos' }; MP.uiState.pendFiltro = '';
+        saveUiState(); renderView('pendientes');
+      } });
+      root.lastChild.appendChild(btn);
+    }
+    return;
+  }
   const eqMap = equiposByKey();
   if (MP.uiState.pendCardView !== false) {
     const wrap = el('div', { class: 'grid-3' });
-    filt.forEach((p) => wrap.appendChild(pendienteCard(p, eqMap[p.equipoKey])));
+    filt.forEach((p) => wrap.appendChild(pendienteCard(p, eqMap[p.equipoKey], { seleccionable: true })));
     root.appendChild(wrap);
   } else {
     const tw = el('div', { class: 'table-wrap' });
@@ -2428,11 +2491,27 @@ function reasignarPendienteMenu(p, anchorBtn) {
   }, 50);
 }
 
-function pendienteCard(p, eq) {
+function pendienteCard(p, eq, opts) {
+  opts = opts || {};
   const vencido = p.fechaCompromiso && p.estado !== 'cerrado' && new Date(p.fechaCompromiso) < new Date(todayISO());
   const diasV = vencido ? -daysBetween(p.fechaCompromiso, todayISO()) : 0;
-  const c = el('div', { class: 'card card-interactive' });
-  c.innerHTML = '<div class="row-between mb-2">' +
+  const c = el('div', { class: 'card card-interactive', style: 'position:relative' });
+  // Checkbox selección (esquina sup izq)
+  if (opts.seleccionable) {
+    const cb = el('input', { type: 'checkbox', style: 'position:absolute;top:8px;left:8px;z-index:2' });
+    cb.checked = !!(MP.uiState.pendSelected || []).includes(p.id);
+    cb.addEventListener('click', (e) => e.stopPropagation());
+    cb.addEventListener('change', () => {
+      MP.uiState.pendSelected = MP.uiState.pendSelected || [];
+      if (cb.checked) { if (!MP.uiState.pendSelected.includes(p.id)) MP.uiState.pendSelected.push(p.id); }
+      else MP.uiState.pendSelected = MP.uiState.pendSelected.filter((x) => x !== p.id);
+      saveUiState();
+      actualizarBarraSeleccion();
+    });
+    c.appendChild(cb);
+  }
+  const body = el('div', { style: opts.seleccionable ? 'padding-left:24px' : '' });
+  body.innerHTML = '<div class="row-between mb-2">' +
     '<div class="row">' + estadoPendDot(p) + ' <strong>' + escapeHtml(p.descripcion) + '</strong></div>' +
     '<span class="badge ' + (p.prioridad === 'alta' ? 'badge-danger' : p.prioridad === 'media' ? 'badge-warning' : 'badge-neutral') + '">' + escapeHtml(p.prioridad || 'media') + '</span>' +
     '</div>' +
@@ -2442,28 +2521,160 @@ function pendienteCard(p, eq) {
     (p.estado === 'en_progreso' ? ' <span class="badge badge-warning">en progreso</span>' : '') + '</div>' +
     ((p.etiquetas && p.etiquetas.length) ? '<div class="row mt-2">' + p.etiquetas.map((t) => '<span class="tag">' + escapeHtml(t) + '</span>').join('') + '</div>' : '') +
     ((p.actualizaciones && p.actualizaciones.length) ? '<div class="tiny muted mt-2">' + icon('file-text',12) + ' ' + p.actualizaciones.length + ' actualización' + (p.actualizaciones.length === 1 ? '' : 'es') + '</div>' : '');
-
-  // Quick actions row (no abre modal)
-  const qa = el('div', { class: 'row mt-3', style: 'gap:4px;border-top:1px solid var(--c-border);padding-top:8px' });
+  c.appendChild(body);
+  // Quick actions: 2 botones visibles + menú "..."
+  const qa = el('div', { class: 'row mt-3', style: 'gap:4px;border-top:1px solid var(--c-border);padding-top:8px;justify-content:flex-end' });
   const noProp = (fn) => (e) => { e.stopPropagation(); fn(); };
   if (p.estado !== 'cerrado') {
-    qa.appendChild(el('button', { class: 'btn btn-sm btn-success tooltip', dataset: { tip: 'Marcar cerrado' }, html: icon('check',12), onclick: noProp(() => cambiarEstadoPendiente(p, 'cerrado')) }));
-    if (p.estado !== 'en_progreso') {
-      qa.appendChild(el('button', { class: 'btn btn-sm btn-secondary tooltip', dataset: { tip: 'Marcar en progreso' }, html: icon('play',12), onclick: noProp(() => cambiarEstadoPendiente(p, 'en_progreso')) }));
-    } else {
-      qa.appendChild(el('button', { class: 'btn btn-sm btn-secondary tooltip', dataset: { tip: 'Pausar (volver a abierto)' }, html: icon('pause',12), onclick: noProp(() => cambiarEstadoPendiente(p, 'abierto')) }));
-    }
-    qa.appendChild(el('button', { class: 'btn btn-sm btn-ghost tooltip', dataset: { tip: 'Posponer 1 día' }, html: '+1d', onclick: noProp(() => posponerPendiente(p, 1)) }));
-    qa.appendChild(el('button', { class: 'btn btn-sm btn-ghost tooltip', dataset: { tip: 'Posponer 1 semana' }, html: '+7d', onclick: noProp(() => posponerPendiente(p, 7)) }));
-    const reasignBtn = el('button', { class: 'btn btn-sm btn-ghost tooltip', dataset: { tip: 'Reasignar' }, html: icon('user',12) });
-    reasignBtn.addEventListener('click', (e) => { e.stopPropagation(); reasignarPendienteMenu(p, reasignBtn); });
-    qa.appendChild(reasignBtn);
+    qa.appendChild(el('button', { class: 'btn btn-sm btn-success tooltip', dataset: { tip: 'Cerrar' }, html: icon('check',12), onclick: noProp(() => cambiarEstadoPendiente(p, 'cerrado')) }));
+    if (p.estado !== 'en_progreso')
+      qa.appendChild(el('button', { class: 'btn btn-sm btn-secondary tooltip', dataset: { tip: 'En progreso' }, html: icon('play',12), onclick: noProp(() => cambiarEstadoPendiente(p, 'en_progreso')) }));
+    else
+      qa.appendChild(el('button', { class: 'btn btn-sm btn-secondary tooltip', dataset: { tip: 'Pausar' }, html: icon('pause',12), onclick: noProp(() => cambiarEstadoPendiente(p, 'abierto')) }));
+    // Menú ...
+    const moreBtn = el('button', { class: 'btn btn-sm btn-ghost tooltip', dataset: { tip: 'Más acciones' }, html: '⋯' });
+    moreBtn.addEventListener('click', (e) => { e.stopPropagation(); mostrarMenuMas(p, moreBtn); });
+    qa.appendChild(moreBtn);
   } else {
     qa.appendChild(el('button', { class: 'btn btn-sm btn-secondary tooltip', dataset: { tip: 'Reabrir' }, html: icon('refresh',12) + ' Reabrir', onclick: noProp(() => cambiarEstadoPendiente(p, 'abierto')) }));
   }
   c.appendChild(qa);
   c.addEventListener('click', () => abrirModalPendiente(p));
   return c;
+}
+
+function mostrarMenuMas(p, anchorBtn) {
+  document.querySelectorAll('.qa-menu').forEach((m) => m.remove());
+  const menu = el('div', { class: 'qa-menu', style: 'position:absolute;background:var(--c-bg-elev);border:1px solid var(--c-border);border-radius:var(--rd-md);box-shadow:var(--sh-lg);padding:4px;z-index:300;min-width:200px' });
+  const items = [
+    { label: 'Posponer +1 día', icon: 'calendar', action: () => posponerPendiente(p, 1) },
+    { label: 'Posponer +1 semana', icon: 'calendar', action: () => posponerPendiente(p, 7) },
+    { label: 'Reasignar…', icon: 'user', action: () => reasignarPendienteMenu(p, anchorBtn) },
+    { label: 'Cambiar prioridad alta', icon: 'flag', action: () => cambiarPrioridad(p, 'alta') },
+    { label: 'Cambiar prioridad media', icon: 'flag', action: () => cambiarPrioridad(p, 'media') },
+    { label: 'Cambiar prioridad baja', icon: 'flag', action: () => cambiarPrioridad(p, 'baja') },
+    { label: 'Editar (modal)', icon: 'edit', action: () => abrirModalPendiente(p) }
+  ];
+  items.forEach((it) => {
+    const row = el('div', { style: 'padding:6px 10px;cursor:pointer;border-radius:var(--rd-sm);font-size:var(--fs-sm);display:flex;align-items:center;gap:6px' });
+    row.innerHTML = icon(it.icon, 12) + ' ' + escapeHtml(it.label);
+    row.addEventListener('mouseenter', () => row.style.background = 'var(--c-bg-soft)');
+    row.addEventListener('mouseleave', () => row.style.background = '');
+    row.addEventListener('click', () => { menu.remove(); it.action(); });
+    menu.appendChild(row);
+  });
+  const rect = anchorBtn.getBoundingClientRect();
+  menu.style.top = (rect.bottom + window.scrollY + 4) + 'px';
+  menu.style.left = (Math.min(rect.left + window.scrollX, window.innerWidth - 220)) + 'px';
+  document.body.appendChild(menu);
+  setTimeout(() => {
+    const closeOnOut = (e) => { if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('mousedown', closeOnOut, true); } };
+    document.addEventListener('mousedown', closeOnOut, true);
+  }, 50);
+}
+
+function cambiarPrioridad(p, prio) {
+  const prev = p.prioridad;
+  p.prioridad = prio;
+  const idx = MP.pendientes.data.findIndex((x) => x.id === p.id);
+  if (idx >= 0) MP.pendientes.data[idx] = p;
+  saveCache(LS.cachePend, MP.pendientes);
+  Queue.add('savePendiente', { pendiente: p });
+  Toast.success('Prioridad: ' + prio, { action: 'Deshacer', duration: 6000,
+    onAction: () => { p.prioridad = prev; saveCache(LS.cachePend, MP.pendientes); Queue.add('savePendiente', { pendiente: p }); if (currentView) renderView(currentView); } });
+  if (currentView) renderView(currentView);
+}
+
+function actualizarBarraSeleccion() {
+  const bar = document.getElementById('selBar');
+  if (!bar) return;
+  const sel = MP.uiState.pendSelected || [];
+  if (!sel.length) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  bar.querySelector('.sel-count').textContent = sel.length + ' seleccionado' + (sel.length === 1 ? '' : 's');
+}
+
+function renderBarraSeleccion() {
+  const bar = el('div', { id: 'selBar', class: 'card', style: 'display:none;position:sticky;top:0;z-index:30;background:var(--c-primary);color:white;border-color:var(--c-primary);padding:10px 16px;margin-bottom:12px;align-items:center;gap:12px;justify-content:space-between' });
+  bar.innerHTML = '<span class="sel-count" style="font-weight:var(--fw-s)"></span>';
+  const acts = el('div', { class: 'row' });
+  acts.appendChild(el('button', { class: 'btn btn-sm btn-success', html: icon('check',12) + ' Cerrar todos', onclick: () => bulkAccion('cerrar') }));
+  acts.appendChild(el('button', { class: 'btn btn-sm btn-secondary', html: icon('play',12) + ' Marcar en progreso', onclick: () => bulkAccion('en_progreso') }));
+  acts.appendChild(el('button', { class: 'btn btn-sm btn-secondary', html: icon('user',12) + ' Reasignar', onclick: (e) => bulkReasignar(e.target) }));
+  acts.appendChild(el('button', { class: 'btn btn-sm btn-ghost', html: icon('calendar',12) + ' Posponer 1 sem', onclick: () => bulkPosponer(7), style: 'color:white' }));
+  acts.appendChild(el('button', { class: 'btn btn-sm btn-ghost', html: icon('x',12) + ' Limpiar', onclick: () => { MP.uiState.pendSelected = []; saveUiState(); renderView('pendientes'); }, style: 'color:white' }));
+  bar.appendChild(acts);
+  return bar;
+}
+
+function bulkAccion(tipo) {
+  const ids = MP.uiState.pendSelected || []; if (!ids.length) return;
+  let count = 0;
+  ids.forEach((id) => {
+    const p = MP.pendientes.data.find((x) => x.id === id); if (!p) return;
+    if (tipo === 'cerrar') p.estado = 'cerrado';
+    else if (tipo === 'en_progreso') p.estado = 'en_progreso';
+    Queue.add('savePendiente', { pendiente: p });
+    count++;
+  });
+  saveCache(LS.cachePend, MP.pendientes);
+  MP.uiState.pendSelected = [];
+  saveUiState();
+  Toast.success(count + ' pendientes actualizados');
+  renderView('pendientes');
+}
+function bulkPosponer(dias) {
+  const ids = MP.uiState.pendSelected || []; if (!ids.length) return;
+  let count = 0;
+  ids.forEach((id) => {
+    const p = MP.pendientes.data.find((x) => x.id === id); if (!p) return;
+    const base = p.fechaCompromiso ? new Date(p.fechaCompromiso) : new Date();
+    base.setDate(base.getDate() + dias);
+    p.fechaCompromiso = base.toISOString().slice(0, 10);
+    p.actualizaciones = p.actualizaciones || [];
+    p.actualizaciones.push({ id: uid(), fecha: new Date().toISOString(), texto: 'Pospuesto ' + dias + 'd (acción masiva)', usuario: '' });
+    Queue.add('savePendiente', { pendiente: p });
+    count++;
+  });
+  saveCache(LS.cachePend, MP.pendientes);
+  MP.uiState.pendSelected = [];
+  saveUiState();
+  Toast.success(count + ' pendientes pospuestos ' + dias + ' días');
+  renderView('pendientes');
+}
+function bulkReasignar(anchor) {
+  document.querySelectorAll('.qa-menu').forEach((m) => m.remove());
+  const menu = el('div', { class: 'qa-menu', style: 'position:absolute;background:var(--c-bg-elev);color:var(--c-text);border:1px solid var(--c-border);border-radius:var(--rd-md);box-shadow:var(--sh-lg);padding:4px;z-index:400;min-width:200px;max-height:280px;overflow-y:auto' });
+  ['(sin asignar)'].concat(EJECUTORES_DEFAULT).forEach((ej) => {
+    const real = ej === '(sin asignar)' ? '' : ej;
+    const it = el('div', { style: 'padding:6px 10px;cursor:pointer;border-radius:var(--rd-sm);font-size:var(--fs-sm)' });
+    it.textContent = ej;
+    it.addEventListener('mouseenter', () => it.style.background = 'var(--c-bg-soft)');
+    it.addEventListener('mouseleave', () => it.style.background = '');
+    it.addEventListener('click', () => {
+      menu.remove();
+      const ids = MP.uiState.pendSelected || [];
+      let count = 0;
+      ids.forEach((id) => {
+        const p = MP.pendientes.data.find((x) => x.id === id); if (!p) return;
+        p.ejecutor = real; Queue.add('savePendiente', { pendiente: p }); count++;
+      });
+      saveCache(LS.cachePend, MP.pendientes);
+      MP.uiState.pendSelected = [];
+      saveUiState();
+      Toast.success(count + ' pendientes reasignados a ' + (real || 'sin asignar'));
+      renderView('pendientes');
+    });
+    menu.appendChild(it);
+  });
+  const rect = anchor.getBoundingClientRect();
+  menu.style.top = (rect.bottom + window.scrollY + 4) + 'px';
+  menu.style.left = (Math.min(rect.left + window.scrollX, window.innerWidth - 220)) + 'px';
+  document.body.appendChild(menu);
+  setTimeout(() => {
+    const closeOnOut = (e) => { if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('mousedown', closeOnOut, true); } };
+    document.addEventListener('mousedown', closeOnOut, true);
+  }, 50);
 }
 
 function renderInconsistencias(root, lista, informativos) {
@@ -2574,11 +2785,7 @@ function renderPlantilla(root) {
   MESES.forEach((m, i) => { const o = el('option', { value: i + 1, text: m }); if (i + 1 === mes) o.selected = true; sel.appendChild(o); });
   sel.addEventListener('change', () => { MP.uiState.plantillaMes = Number(sel.value); saveUiState(); renderView('plantilla'); });
   row.appendChild(el('label', { class: 'row tiny', style: 'gap:6px' }, [el('span', { text: 'Mes:' }), sel]));
-  row.appendChild(el('button', { class: 'btn btn-primary', html: icon('file-spreadsheet',14) + ' Generar plantilla en Sheet', onclick: async () => {
-    Toast.show('Generando…');
-    try { const r = await api('generarPlantillaMensual', { mes }); if (r.ok) Toast.success('Hoja creada: ' + r.data.hoja); else Toast.danger('Error: ' + r.error); } catch (e) { Toast.danger('Sin conexión'); }
-  } }));
-  row.appendChild(el('button', { class: 'btn btn-secondary', html: icon('download',14) + ' Descargar Excel', onclick: () => exportarPlantillaExcel(mes) }));
+  row.appendChild(el('button', { class: 'btn btn-primary', html: icon('download',14) + ' Descargar Excel', onclick: () => exportarPlantillaExcel(mes) }));
   row.appendChild(el('button', { class: 'btn btn-secondary', html: icon('upload',14) + ' Subir plantilla completada', onclick: () => subirPlantillaCompleta(mes) }));
   row.appendChild(el('button', { class: 'btn btn-secondary', html: icon('file-pdf',14) + ' PDF', onclick: () => exportarPdfMes(mes, equiposDelMes(mes)) }));
   card.appendChild(row);
@@ -3277,11 +3484,37 @@ function abrirModalPendiente(p) {
     } }));
   }
   ft.appendChild(el('button', { class: 'btn btn-ghost', text: 'Cancelar', dataset: { close: '1' } }));
-  ft.appendChild(el('button', { class: 'btn btn-primary', text: 'Guardar', onclick: () => {
+  ft.appendChild(el('button', { class: 'btn btn-primary', text: 'Guardar', onclick: async () => {
     if (!p.descripcion || !p.descripcion.trim()) { Toast.danger('La descripción es obligatoria'); return; }
     p.etiquetas = (form.querySelector('[data-key="_etiquetasStr"]') ? form.querySelector('[data-key="_etiquetasStr"]').value : '').split(',').map((s) => s.trim()).filter(Boolean);
     delete p._etiquetasStr;
-    if (isNew) p.id = uid();
+    // Detección de duplicados: mismo equipo + descripción muy similar en últimos 5 minutos
+    if (isNew) {
+      const ndesc = normalize(p.descripcion);
+      const ahora = Date.now();
+      const cinco_min = 5 * 60 * 1000;
+      const similar = (MP.pendientes.data || []).find((x) => {
+        if (x.estado === 'cerrado') return false;
+        if ((x.equipoKey || '') !== (p.equipoKey || '')) return false;
+        if (!x.fechaCreacion) return false;
+        const fAge = ahora - new Date(x.fechaCreacion + 'T00:00:00').getTime();
+        if (fAge > cinco_min * 12) return false; // ventana 1h
+        const nxd = normalize(x.descripcion || '');
+        // Considera similar si comparten 80%+ caracteres iniciales o son contains
+        if (nxd === ndesc) return true;
+        if (nxd.length > 10 && ndesc.length > 10 && (nxd.indexOf(ndesc) >= 0 || ndesc.indexOf(nxd) >= 0)) return true;
+        return false;
+      });
+      if (similar) {
+        const seguir = await confirmModal({
+          title: 'Posible duplicado',
+          message: 'Ya existe un pendiente similar para este equipo: "' + (similar.descripcion || '').slice(0, 80) + '". ¿Crear otro igualmente?',
+          okText: 'Crear de todas formas', cancelText: 'Cancelar'
+        });
+        if (!seguir) return;
+      }
+      p.id = uid();
+    }
     if (!p.fechaCreacion) p.fechaCreacion = todayISO();
     const idx = MP.pendientes.data.findIndex((x) => x.id === p.id);
     if (idx >= 0) MP.pendientes.data[idx] = p; else MP.pendientes.data.push(p);

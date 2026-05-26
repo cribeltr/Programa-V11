@@ -82,6 +82,7 @@ function doGet(e) {
 
 const ACTIONS = {
   health: (p) => ({ ok: true, ts: Date.now(), schema: SCHEMA_VERSION, sheetOk: testSheet_(p) }),
+  getDashboardData: (p) => getDashboardData_(p),
   inicializarHojas: (p) => withLock(() => inicializarHojas_(p)),
   cargarMaestro: (p) => withLock(() => cargarMaestro_(p)),
   toggleHojasSistema: (p) => withLock(() => toggleHojasSistema_(p)),
@@ -563,6 +564,28 @@ function getEquipos_(payload) {
   }
   try { cache.put('equipos_v1', JSON.stringify(equipos), CACHE_TTL_SEC); } catch (e) {}
   return { ok: true, data: equipos };
+}
+
+/* =====================================================================
+ * Dashboard data en una sola llamada (reduce de 7 fetch a 1)
+ * ===================================================================== */
+function getDashboardData_(payload) {
+  try {
+    const equipos = getEquipos_(payload);
+    if (!equipos.ok) return equipos;
+    return { ok: true, data: {
+      equipos: equipos.data,
+      pendientes: (getPendientes_(payload).data) || [],
+      eventos: (getEventos_(payload).data) || [],
+      reprogs: (getReprogs_(payload).data) || [],
+      overrides: (getOverrides_(payload).data) || {},
+      asignaciones: (getAsignaciones_(payload).data) || {},
+      inconsistencias: (getInconsistencias_(payload).data) || [],
+      ts: nowIso_()
+    }};
+  } catch (e) {
+    return { ok: false, error: String(e && e.message || e) };
+  }
 }
 
 /* =====================================================================
