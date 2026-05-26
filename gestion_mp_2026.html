@@ -1417,29 +1417,61 @@ function updateSyncIndicator() {
 async function recargarTodo(opts) {
   opts = opts || {};
   if (!MP.config.WEB_APP_URL || !MP.config.API_TOKEN) return;
+  // Intenta batch (Code.gs nuevo); fallback automatico a 7 fetch individuales
   try {
-    // Batch: 1 request en vez de 7
     const r = await api('getDashboardData', { nocache: opts.force });
-    if (!r.ok) throw new Error(r.error || 'dashboard_error');
-    const d = r.data;
-    const ts = Date.now();
-    MP.equipos = { ts, data: d.equipos || [] }; saveCache(LS.cacheEq, MP.equipos);
-    MP.pendientes = { ts, data: d.pendientes || [] }; saveCache(LS.cachePend, MP.pendientes);
-    MP.eventos = { ts, data: d.eventos || [] }; saveCache(LS.cacheEv, MP.eventos);
-    MP.reprogs = { ts, data: d.reprogs || [] }; saveCache(LS.cacheReprog, MP.reprogs);
-    MP.overrides = { ts, data: d.overrides || {} }; saveCache(LS.cacheOver, MP.overrides);
-    MP.asignaciones = { ts, data: d.asignaciones || {} }; saveCache(LS.cacheAsign, MP.asignaciones);
-    MP.inconsistencias = { ts, data: d.inconsistencias || [] }; saveCache(LS.cacheInc, MP.inconsistencias);
-    MP.ultimoSyncOk = Date.now();
-    calcularKPIsLocal();
-    updateSyncIndicator();
-    if (currentView) renderView(currentView);
-    return true;
-  } catch (e) {
-    console.warn('recargarTodo error', e);
-    MP.syncStatus = 'offline';
-    updateSyncIndicator();
+    if (r.ok) {
+      const d = r.data;
+      const ts = Date.now();
+      MP.equipos = { ts, data: d.equipos || [] }; saveCache(LS.cacheEq, MP.equipos);
+      MP.pendientes = { ts, data: d.pendientes || [] }; saveCache(LS.cachePend, MP.pendientes);
+      MP.eventos = { ts, data: d.eventos || [] }; saveCache(LS.cacheEv, MP.eventos);
+      MP.reprogs = { ts, data: d.reprogs || [] }; saveCache(LS.cacheReprog, MP.reprogs);
+      MP.overrides = { ts, data: d.overrides || {} }; saveCache(LS.cacheOver, MP.overrides);
+      MP.asignaciones = { ts, data: d.asignaciones || {} }; saveCache(LS.cacheAsign, MP.asignaciones);
+      MP.inconsistencias = { ts, data: d.inconsistencias || [] }; saveCache(LS.cacheInc, MP.inconsistencias);
+      MP.ultimoSyncOk = Date.now();
+      calcularKPIsLocal();
+      updateSyncIndicator();
+      if (currentView) renderView(currentView);
+      return true;
+    }
+    // Si la accion no existe en el Code.gs del usuario, caer al fallback
+    if (r.error && /unknown_action/i.test(r.error)) throw new Error('fallback');
+    // Otro error: avisar
+    Toast.warning('Servidor: ' + r.error);
     return false;
+  } catch (e) {
+    // Fallback: Code.gs antiguo sin getDashboardData
+    try {
+      const [eq, pe, ev, re, ov, asn, ic] = await Promise.all([
+        api('getEquipos', { nocache: opts.force }),
+        api('getPendientes', {}),
+        api('getEventos', {}),
+        api('getReprogs', {}),
+        api('getOverrides', {}),
+        api('getAsignaciones', {}),
+        api('getInconsistencias', {})
+      ]);
+      if (eq.ok) { MP.equipos = { ts: Date.now(), data: eq.data }; saveCache(LS.cacheEq, MP.equipos); }
+      if (pe.ok) { MP.pendientes = { ts: Date.now(), data: pe.data }; saveCache(LS.cachePend, MP.pendientes); }
+      if (ev.ok) { MP.eventos = { ts: Date.now(), data: ev.data }; saveCache(LS.cacheEv, MP.eventos); }
+      if (re.ok) { MP.reprogs = { ts: Date.now(), data: re.data }; saveCache(LS.cacheReprog, MP.reprogs); }
+      if (ov.ok) { MP.overrides = { ts: Date.now(), data: ov.data }; saveCache(LS.cacheOver, MP.overrides); }
+      if (asn.ok) { MP.asignaciones = { ts: Date.now(), data: asn.data }; saveCache(LS.cacheAsign, MP.asignaciones); }
+      if (ic.ok) { MP.inconsistencias = { ts: Date.now(), data: ic.data }; saveCache(LS.cacheInc, MP.inconsistencias); }
+      MP.ultimoSyncOk = Date.now();
+      calcularKPIsLocal();
+      updateSyncIndicator();
+      if (currentView) renderView(currentView);
+      return true;
+    } catch (e2) {
+      console.warn('recargarTodo error', e2);
+      MP.syncStatus = 'offline';
+      updateSyncIndicator();
+      Toast.danger('Error al recargar datos: ' + (e2 && e2.message || e2));
+      return false;
+    }
   }
 }
 
@@ -4343,18 +4375,33 @@ async function cargarMaestroDesdeArchivo(file) {
   ft.appendChild(el('button', { class: 'btn btn-primary', html: icon('upload',14) + ' Cargar al Google Sheet', onclick: async () => {
     const detectar = detectChk.checked;
     document.querySelectorAll('.modal-backdrop').forEach((b, i, all) => { if (i === all.length - 1) b.remove(); });
-    Toast.show(detectar ? 'Snapshot + carga + detección…' : 'Enviando al Sheet…');
+    // Modal de progreso
+    const progRoot = el('div');
+    progRoot.innerHTML = '<div class="modal-header"><h3 class="modal-title">' + icon('upload',16) + ' Subiendo maestro al Sheet</h3></div>' +
+      '<div class="modal-body center" style="padding:32px 24px"><div class="skeleton" style="width:60%;height:8px;margin:0 auto var(--sp-3)"></div>' +
+      '<div id="progMsg" class="tiny muted">Enviando ' + pmpRows.length + ' filas PMP y ' + regRows.length + ' filas Registro… puede tardar 30-90 s para archivos grandes.</div></div>';
+    const progM = openModal(progRoot, { dismissable: false });
     try {
       const r = await api('cargarMaestro', { pmpRows, regRows, replace: true, detectarCambios: detectar }, { timeout: 300000 });
+      progM.close();
       if (r.ok) {
         const d = r.data || {};
         let msg = 'Maestro cargado: ' + d.pmpFilas + ' filas PMP, ' + d.regFilas + ' filas Registro';
         if (detectar) msg += ' · ' + (d.cambiosDetectados || 0) + ' cambios · ' + (d.pendientesCreados || 0) + ' pendientes creados';
         Toast.success(msg);
-        await recargarTodo({ force: true });
+        Toast.show('Refrescando datos…');
+        const okRecargar = await recargarTodo({ force: true });
+        if (!okRecargar) Toast.warning('Maestro cargado pero la recarga falló. Pulsa "Recargar" en el header.');
         if (detectar && d.cambiosDetectados) mostrarResumenCambios(d);
-      } else Toast.danger('Error: ' + r.error);
-    } catch (e) { Toast.danger('Error: ' + e.message); }
+      } else if (r.error && /unknown_action/i.test(r.error)) {
+        Toast.danger('Tu Apps Script no tiene la acción "cargarMaestro". Pega el último Code.gs y vuelve a Implementar.', { duration: 12000 });
+      } else {
+        Toast.danger('Error: ' + r.error);
+      }
+    } catch (e) {
+      progM.close();
+      Toast.danger('Error: ' + (e && e.message || e));
+    }
   } }));
   root.appendChild(ft);
   openModal(root, { size: 'lg' });
